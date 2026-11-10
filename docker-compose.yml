@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  memoria:
+    build: .
+    image: memoria-local:latest
+    container_name: memoria-local
+    ports:
+      - "0.0.0.0:8080:8080"
+    volumes:
+      # Persistent SQLite DB and archived activity logs
+      - ./data:/data
+      # Read-only bind mounts to your local photo/video storage folders and network mounts
+      - ./media_sources:/app/media_sources:ro
+      - ./media_sources:/media_sources:ro
+      - /mnt:/mnt:ro
+      - /media:/media:ro
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8080
+      - DB_PATH=/data/memoria.db
+      - HOST_NETWORK_URLS=${HOST_NETWORK_URLS:-http://memoria-demo.local:8080,http://192.168.1.100:8080}
+    restart: unless-stopped

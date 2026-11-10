@@ -1,0 +1,18 @@
+[package]
+name = "memoria"
+version = "0.3.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1.0", features = ["full"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+zip = { version = "2.1", default-features = false, features = ["deflate"] }
+walkdir = "2.5"
+nom-exif = "3.4"

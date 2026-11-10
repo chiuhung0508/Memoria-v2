@@ -1,0 +1,17 @@
+# SQLite databases and WAL files
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/logs/
+
+# Build artifacts
+target/
+*.zip
+*.tar.gz
+__pycache__/
+*.pyc
+
+# Environment & node
+node_modules/
+.env
+.DS_Store
