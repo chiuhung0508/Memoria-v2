@@ -59,8 +59,17 @@ struct MediaFilterQuery {
     date_to: Option<String>,
     album: Option<String>,
     search: Option<String>,
+    sort: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct AlbumInfo {
+    album_name: String,
+    min_date: Option<String>,
+    max_date: Option<String>,
+    count: i64,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -341,9 +350,9 @@ async fn trigger_sync_handler(State(state): State<Arc<AppState>>) -> Result<Stat
     Ok(StatusCode::ACCEPTED)
 }
 
-async fn list_albums_handler(State(state): State<Arc<AppState>>) -> Result<Json<Vec<String>>, StatusCode> {
-    let albums: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT album_name FROM media WHERE album_name IS NOT NULL ORDER BY album_name ASC"
+async fn list_albums_handler(State(state): State<Arc<AppState>>) -> Result<Json<Vec<AlbumInfo>>, StatusCode> {
+    let albums = sqlx::query_as::<_, AlbumInfo>(
+        "SELECT album_name, MIN(date_taken) AS min_date, MAX(date_taken) AS max_date, COUNT(*) AS count FROM media WHERE album_name IS NOT NULL GROUP BY album_name ORDER BY album_name ASC"
     )
     .fetch_all(&state.db)
     .await
@@ -358,6 +367,12 @@ async fn list_media_handler(
 ) -> Result<Json<PaginatedResponse>, StatusCode> {
     let limit = filter.limit.unwrap_or(40);
     let offset = filter.offset.unwrap_or(0);
+    let order_clause = match filter.sort.as_deref() {
+        Some("date_asc") => "date_taken ASC, id ASC",
+        Some("name_asc") => "album_name ASC, file_path ASC",
+        Some("name_desc") => "album_name DESC, file_path DESC",
+        _ => "date_taken DESC, id DESC",
+    };
 
     let mut where_clause = " WHERE 1=1".to_string();
     if filter.search.is_some() {
@@ -382,8 +397,8 @@ async fn list_media_handler(
     let total = q_count.fetch_one(&state.db).await.unwrap_or(0);
 
     let select_query = format!(
-        "SELECT id, album_name, file_type, date_taken, latitude, longitude, caption, thumb_hash FROM media {} ORDER BY date_taken DESC LIMIT ? OFFSET ?",
-        where_clause
+        "SELECT id, album_name, file_type, date_taken, latitude, longitude, caption, thumb_hash FROM media {} ORDER BY {} LIMIT ? OFFSET ?",
+        where_clause, order_clause
     );
 
     let mut q_items = sqlx::query_as::<_, MediaItem>(&select_query);

@@ -145,18 +145,22 @@
   <!-- AUTO-HIDE SIDEBAR -->
   <aside id="sidebar" style="background-color: var(--bg-panel); border-color: var(--border-color);" class="fixed top-0 bottom-0 left-0 w-72 border-r z-40 flex shadow-2xl backdrop-blur">
     <div class="flex-1 flex flex-col p-4 overflow-hidden">
-      <div style="border-color: var(--border-color);" class="pb-3 border-b flex items-center justify-between">
-        <span class="font-bold text-sm tracking-wide">Album Catalog</span>
-        <button id="sort-toggle-btn" onclick="cycleAlbumSort()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="text-[10px] px-2 py-0.5 rounded border text-blue-400">📅 Date ↑</button>
+      <div style="border-color: var(--border-color);" class="pb-3 border-b flex items-center justify-between gap-1">
+        <span class="font-bold text-xs tracking-wide shrink-0">Album Catalog</span>
+        <div class="flex items-center gap-1 shrink-0">
+          <button id="sort-name-btn" onclick="toggleNameSort()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="text-[10px] px-1.5 py-0.5 rounded border text-zinc-400 hover:border-blue-500 transition" title="Sort by Folder Name (ASC / DESC)">🔤 Name ↑</button>
+          <button id="sort-toggle-btn" onclick="toggleDateSort()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="text-[10px] px-1.5 py-0.5 rounded border text-blue-400 border-blue-500/60 hover:border-blue-500 transition" title="Sort by Date (ASC / DESC)">📅 Date ↑</button>
+        </div>
       </div>
-      <div class="mt-2.5 mb-2">
-        <input id="folder-filter-input" type="text" placeholder="Filter folders..." oninput="handleFolderSearch(this.value)" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-2.5 py-1 text-[11px] focus:outline-none" />
+      <div class="mt-2.5 mb-2 relative flex items-center">
+        <input id="folder-filter-input" type="text" placeholder="Filter folders..." oninput="handleFolderSearch(this.value)" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-2.5 py-1 pr-6 text-[11px] focus:outline-none focus:border-blue-500" />
+        <button id="clear-folder-filter-btn" onclick="clearFolderSearch()" class="hidden absolute right-2 text-zinc-400 hover:text-red-500 text-[10px]">✕</button>
       </div>
       <div class="flex-1 overflow-y-auto space-y-4">
         <div id="sidebar-albums-list" class="space-y-1"></div>
       </div>
     </div>
-    <div style="background-color: var(--border-color);" class="w-[24px] flex items-center justify-center cursor-pointer">
+    <div onclick="document.getElementById('sidebar').classList.toggle('expanded')" style="background-color: var(--border-color);" class="w-[24px] flex items-center justify-center cursor-pointer">
       <span class="rotate-90 text-[10px] tracking-widest uppercase font-semibold text-zinc-400">Albums</span>
     </div>
   </aside>
@@ -352,6 +356,7 @@
 
   <script>
     let mediaItems = [];
+    let allAlbums = [];
     let currentAlbum = null;
     let limit = 40;
     let offset = 0;
@@ -443,19 +448,133 @@
     async function loadAlbums() {
       try {
         const res = await fetch('/api/media/albums');
-        const albums = await res.json();
-        const container = document.getElementById('sidebar-albums-list');
-        container.innerHTML = `
-          <button onclick="selectAlbum(null)" class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-zinc-800/40 transition">📂 All Items</button>
-        ` + albums.map(a => `
-          <button onclick="selectAlbum('${a}')" class="w-full text-left px-2 py-1.5 rounded-lg hover:bg-zinc-800/40 transition truncate">📁 ${a}</button>
-        `).join('');
+        const data = await res.json();
+        allAlbums = (Array.isArray(data) ? data : []).map(a => {
+          if (typeof a === 'string') {
+            return { album_name: a, min_date: '', max_date: '', count: 0 };
+          }
+          return {
+            album_name: a.album_name,
+            min_date: a.min_date || '',
+            max_date: a.max_date || '',
+            count: a.count || 0
+          };
+        });
+        renderAlbumsList();
       } catch (err) {}
+    }
+
+    function updateSortButtonsUI() {
+      const btnName = document.getElementById('sort-name-btn');
+      const btnDate = document.getElementById('sort-toggle-btn');
+      if (!btnName || !btnDate) return;
+
+      const isName = currentSortMode.startsWith('name_');
+      const isDate = currentSortMode.startsWith('date_');
+
+      if (isName) {
+        btnName.innerText = currentSortMode === 'name_asc' ? '🔤 Name ↑' : '🔤 Name ↓';
+        btnName.className = 'text-[10px] px-1.5 py-0.5 rounded border text-blue-400 border-blue-500/60 hover:border-blue-500 transition font-semibold';
+        btnDate.className = 'text-[10px] px-1.5 py-0.5 rounded border text-zinc-400 hover:border-blue-500 transition';
+      } else if (isDate) {
+        btnDate.innerText = currentSortMode === 'date_asc' ? '📅 Date ↑' : '📅 Date ↓';
+        btnDate.className = 'text-[10px] px-1.5 py-0.5 rounded border text-blue-400 border-blue-500/60 hover:border-blue-500 transition font-semibold';
+        btnName.className = 'text-[10px] px-1.5 py-0.5 rounded border text-zinc-400 hover:border-blue-500 transition';
+      }
+    }
+
+    function toggleNameSort() {
+      if (currentSortMode === 'name_asc') {
+        currentSortMode = 'name_desc';
+      } else {
+        currentSortMode = 'name_asc';
+      }
+      updateSortButtonsUI();
+      renderAlbumsList();
+      applyFiltersAndPaging(0);
+    }
+
+    function toggleDateSort() {
+      if (currentSortMode === 'date_asc') {
+        currentSortMode = 'date_desc';
+      } else {
+        currentSortMode = 'date_asc';
+      }
+      updateSortButtonsUI();
+      renderAlbumsList();
+      applyFiltersAndPaging(0);
+    }
+
+    function cycleAlbumSort() {
+      toggleDateSort();
+    }
+
+    function handleFolderSearch(val) {
+      folderSearchQuery = (val || '').trim();
+      const clearBtn = document.getElementById('clear-folder-filter-btn');
+      if (clearBtn) {
+        clearBtn.classList.toggle('hidden', folderSearchQuery.length === 0);
+      }
+      renderAlbumsList();
+    }
+
+    function clearFolderSearch() {
+      const inp = document.getElementById('folder-filter-input');
+      if (inp) inp.value = '';
+      folderSearchQuery = '';
+      const clearBtn = document.getElementById('clear-folder-filter-btn');
+      if (clearBtn) clearBtn.classList.add('hidden');
+      renderAlbumsList();
+    }
+
+    function renderAlbumsList() {
+      const container = document.getElementById('sidebar-albums-list');
+      if (!container) return;
+
+      const q = folderSearchQuery.toLowerCase();
+      let filtered = allAlbums.filter(a => !q || a.album_name.toLowerCase().includes(q));
+
+      filtered.sort((a, b) => {
+        if (currentSortMode === 'name_asc') {
+          return a.album_name.localeCompare(b.album_name);
+        } else if (currentSortMode === 'name_desc') {
+          return b.album_name.localeCompare(a.album_name);
+        } else if (currentSortMode === 'date_asc') {
+          return (a.min_date || '').localeCompare(b.min_date || '') || a.album_name.localeCompare(b.album_name);
+        } else {
+          return (b.max_date || '').localeCompare(a.max_date || '') || a.album_name.localeCompare(b.album_name);
+        }
+      });
+
+      const allActive = currentAlbum === null ? 'bg-blue-600/20 text-blue-400 font-semibold' : 'hover:bg-zinc-800/40';
+      const albumsHtml = filtered.map(a => {
+        const isActive = currentAlbum === a.album_name ? 'bg-blue-600/20 text-blue-400 font-semibold' : 'hover:bg-zinc-800/40';
+        const safeName = a.album_name.replace(/'/g, "\\'");
+        const dateHint = a.min_date ? a.min_date.split(' ')[0] : '';
+        return `
+          <button onclick="selectAlbum('${safeName}')" class="w-full text-left px-2 py-1.5 rounded-lg transition flex items-center justify-between gap-2 ${isActive}">
+            <span class="truncate">📁 ${a.album_name}</span>
+            ${dateHint ? `<span class="text-[9px] text-zinc-500 font-mono shrink-0">${dateHint}</span>` : ''}
+          </button>
+        `;
+      }).join('');
+
+      container.innerHTML = `
+        <button onclick="selectAlbum(null)" class="w-full text-left px-2 py-1.5 rounded-lg transition flex items-center justify-between ${allActive}">
+          <span>📂 All Items</span>
+        </button>
+      ` + (filtered.length > 0 ? albumsHtml : `<div class="px-2 py-2 text-[11px] text-zinc-500 italic">No matching folders</div>`);
     }
 
     function selectAlbum(album) {
       currentAlbum = album;
       document.getElementById('active-album-title').innerText = album || 'All Media';
+      renderAlbumsList();
+      applyFiltersAndPaging(0);
+    }
+
+    function changeLimit(val) {
+      limit = parseInt(val, 10) || 40;
       applyFiltersAndPaging(0);
     }
 
@@ -464,7 +583,7 @@
       const from = document.getElementById('date-from').value;
       const to = document.getElementById('date-to').value;
 
-      let url = `/api/media?limit=${limit}&offset=${offset}&`;
+      let url = `/api/media?limit=${limit}&offset=${offset}&sort=${encodeURIComponent(currentSortMode)}&`;
       if (searchQuery) url += `search=${encodeURIComponent(searchQuery)}&`;
       if (from) url += `date_from=${from}&`;
       if (to) url += `date_to=${to}&`;

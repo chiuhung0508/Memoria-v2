@@ -190,8 +190,22 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
 
         elif path == "/api/media/albums":
             conn = get_db()
-            rows = conn.execute("SELECT DISTINCT album_name FROM media WHERE album_name IS NOT NULL ORDER BY album_name ASC").fetchall()
-            albums = [r["album_name"] for r in rows]
+            rows = conn.execute("""
+                SELECT album_name, MIN(date_taken) AS min_date, MAX(date_taken) AS max_date, COUNT(*) AS item_count
+                FROM media
+                WHERE album_name IS NOT NULL
+                GROUP BY album_name
+                ORDER BY album_name ASC
+            """).fetchall()
+            albums = [
+                {
+                    "album_name": r["album_name"],
+                    "min_date": r["min_date"] or "",
+                    "max_date": r["max_date"] or "",
+                    "count": r["item_count"]
+                }
+                for r in rows
+            ]
             conn.close()
             self.send_json(albums)
             return
@@ -203,6 +217,15 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             date_from = query.get("date_from", [None])[0]
             date_to = query.get("date_to", [None])[0]
             album = query.get("album", [None])[0]
+            sort = query.get("sort", ["date_desc"])[0]
+
+            order_map = {
+                "date_asc": "date_taken ASC, id ASC",
+                "date_desc": "date_taken DESC, id DESC",
+                "name_asc": "album_name ASC, file_path ASC",
+                "name_desc": "album_name DESC, file_path DESC"
+            }
+            order_sql = order_map.get(sort, "date_taken DESC, id DESC")
 
             conn = get_db()
             where = ["1=1"]
@@ -225,7 +248,7 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             where_sql = " AND ".join(where)
             total = conn.execute(f"SELECT COUNT(*) FROM media WHERE {where_sql}", params).fetchone()[0]
 
-            query_sql = f"SELECT id, album_name, file_type, date_taken, latitude, longitude, caption, thumb_hash FROM media WHERE {where_sql} ORDER BY date_taken DESC LIMIT ? OFFSET ?"
+            query_sql = f"SELECT id, album_name, file_type, date_taken, latitude, longitude, caption, thumb_hash FROM media WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
             rows = conn.execute(query_sql, params + [limit, offset]).fetchall()
             
             items = []
