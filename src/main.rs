@@ -151,7 +151,7 @@ async fn init_database_schema(db: &Pool<Sqlite>) -> Result<(), Box<dyn std::erro
         CREATE TABLE IF NOT EXISTS sources_config (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             album_name TEXT NOT NULL,
-            path_location TEXT NOT NULL UNIQUE,
+            path_location TEXT NOT NULL,
             tags TEXT,
             last_synced DATETIME
         );
@@ -159,14 +159,34 @@ async fn init_database_schema(db: &Pool<Sqlite>) -> Result<(), Box<dyn std::erro
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_id INTEGER REFERENCES sources_config(id) ON DELETE CASCADE,
             album_name TEXT,
-            file_path TEXT NOT NULL UNIQUE,
+            file_path TEXT NOT NULL,
             file_type TEXT NOT NULL,
             date_taken TEXT,
             latitude REAL,
             longitude REAL,
             caption TEXT DEFAULT '',
             thumb_hash TEXT,
-            tags TEXT
+            tags TEXT,
+            UNIQUE(album_name, file_path)
+        );
+        CREATE TABLE IF NOT EXISTS virtual_albums (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            album_name TEXT NOT NULL UNIQUE,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS virtual_album_items (
+            album_name TEXT NOT NULL,
+            media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+            added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (album_name, media_id)
+        );
+        CREATE TABLE IF NOT EXISTS sharing_albums (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            share_token TEXT NOT NULL UNIQUE,
+            passcode TEXT NOT NULL,
+            album_name TEXT NOT NULL,
+            media_ids TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_media_date ON media(date_taken);
         CREATE INDEX IF NOT EXISTS idx_media_album ON media(album_name);

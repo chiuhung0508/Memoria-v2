@@ -236,7 +236,14 @@ python3 server.py
 3. **Harden Account Credentials:**
    * Click **⚙️ Settings** in the top navigation bar.
    * Under **🔐 Account Security & Credentials**, enter the current demo password (`demo`), specify your new custom username and strong password (minimum 4 characters), and click **Update Credentials**.
-4. **Add & Sync Custom Photo/Video Folders:**
+4. **Add, Sync & Remove Custom Photo/Video Folders:**
    * In **⚙️ Settings $\rightarrow$ Source Directories & SMB Shares**, click **+ Add Path**.
-   * Enter an Album Name and container-mounted path (e.g., `/mnt/nas_photos` or `/media/usb_drive`).
-   * Click **Save Sources**, then click **🔄 Reload Index & Sync Database**.
+   * Enter an Album Name and container-mounted path or SMB mount (e.g., `/mnt/nas_photos` or `/media/usb_drive`).
+   * Click **Save Sources** or **🔄 Reload Index & Sync Database** — the new folder/album immediately appears in the sidebar **Album Catalog**.
+   * To remove any configured source album, click the **🗑️** remove icon next to its row in Settings (or in the sidebar Album Catalog).
+5. **Create Virtual Albums & Link Selected Photos:**
+   * Click **☑️ Select** in the top navigation bar (or hover any photo and click its top-left `✓` checkbox) to select multiple photos.
+   * Click **📁+ Add to Album** (or **+ Virtual** in the sidebar) to link the selected database photos into an existing album or a new **Virtual Album** (`🗂️ Virtual`) with zero file duplication on disk.
+6. **Share Virtual Albums with Secured Link & Auto-Generated 4-Digit Passcode:**
+   * Click **🔗 Share** in the top bar (or next to any album in the sidebar) to generate a secured share URL (`http://<host>:8080/?share=<token>`) and an **auto-generated 4-digit numeric passcode**.
+   * Recipients opening the share URL are prompted by the Passcode Gate to enter the 4-digit passcode and gain read-only access strictly to the linked database photos.

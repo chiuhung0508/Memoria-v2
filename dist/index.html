@@ -142,6 +142,139 @@
     </div>
   </div>
 
+  <!-- SHARED VIRTUAL ALBUM PASSCODE GATE MODAL -->
+  <div id="share-gate-modal" class="fixed inset-0 bg-black/90 hidden items-center justify-center z-50 p-4 backdrop-blur-md">
+    <div style="background-color: var(--bg-panel); border-color: var(--border-color);" class="border p-8 rounded-2xl w-96 shadow-2xl space-y-4">
+      <div class="text-center space-y-1">
+        <div class="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-blue-500/15 border border-blue-500/30 text-2xl mb-1">🔒</div>
+        <h2 class="text-base font-bold">Shared Virtual Album</h2>
+        <p id="share-gate-album-title" class="text-xs text-blue-400 font-semibold">Protected Album Link</p>
+        <p class="text-[11px] text-zinc-400">Enter the 4-digit numeric passcode to view linked photos.</p>
+      </div>
+
+      <div class="space-y-3">
+        <input id="share-gate-passcode" type="text" maxlength="4" inputmode="numeric" pattern="[0-9]{4}" placeholder="••••"
+               onkeydown="if(event.key==='Enter') verifySharedAlbumPasscode()"
+               style="background-color: var(--bg-input); border-color: var(--border-color);"
+               class="w-full border rounded-xl px-4 py-3 text-center text-lg font-mono tracking-[0.6em] focus:outline-none focus:border-blue-500" />
+        <button onclick="verifySharedAlbumPasscode()" class="w-full bg-blue-600 hover:bg-blue-500 py-2.5 rounded-xl font-semibold transition text-white text-xs shadow-lg">
+          🔓 Unlock Shared Album
+        </button>
+      </div>
+      <p id="share-gate-error" class="text-rose-400 text-[11px] hidden text-center font-medium"></p>
+      <div class="pt-2 border-t border-zinc-800 text-center">
+        <a href="/" class="text-[11px] text-zinc-400 hover:text-blue-400 transition">Return to Memoria Vault Sign-In &rarr;</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ADD TO VIRTUAL ALBUM MODAL -->
+  <div id="add-album-modal" class="fixed inset-0 bg-black/80 hidden items-center justify-center z-50 p-4 backdrop-blur-sm">
+    <div style="background-color: var(--bg-panel); border-color: var(--border-color);" class="border p-6 rounded-2xl w-full max-w-md shadow-2xl space-y-4">
+      <div class="flex items-center justify-between border-b pb-3" style="border-color: var(--border-color);">
+        <div>
+          <h3 class="text-sm font-bold flex items-center gap-2"><span>🗂️</span> Create / Link Virtual Album</h3>
+          <p id="add-album-selection-subtitle" class="text-[11px] text-zinc-400 mt-0.5">Links selected database photos without duplicating files.</p>
+        </div>
+        <button onclick="closeAddToAlbumModal()" class="text-zinc-400 hover:text-white text-sm px-1">✕</button>
+      </div>
+
+      <div class="space-y-3">
+        <div>
+          <label class="block text-[11px] text-zinc-400 mb-1 font-medium">Select Existing Album / Folder</label>
+          <select id="existing-album-select" onchange="if(this.value) document.getElementById('new-virtual-album-name').value=''"
+                  style="background-color: var(--bg-input); border-color: var(--border-color);"
+                  class="w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500">
+            <option value="">-- Or type a new Virtual Album name below --</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-[11px] text-zinc-400 mb-1 font-medium">New Virtual Album Name</label>
+          <input id="new-virtual-album-name" type="text" placeholder="e.g. Favorites 2025, Family Selection..."
+                 oninput="if(this.value) document.getElementById('existing-album-select').value=''"
+                 style="background-color: var(--bg-input); border-color: var(--border-color);"
+                 class="w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500" />
+        </div>
+
+        <label class="flex items-center gap-2 text-[11px] text-zinc-300 cursor-pointer pt-1">
+          <input id="add-album-auto-share" type="checkbox" class="accent-blue-500 rounded" />
+          <span>Also generate a secured share link &amp; 4-digit passcode right away</span>
+        </label>
+      </div>
+
+      <div id="add-album-status" class="text-xs hidden"></div>
+
+      <div class="flex items-center justify-end gap-2 pt-2 border-t" style="border-color: var(--border-color);">
+        <button onclick="closeAddToAlbumModal()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="px-3 py-1.5 border rounded-lg text-xs text-zinc-300 hover:text-white">Cancel</button>
+        <button onclick="submitAddToVirtualAlbum()" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg text-xs transition shadow">
+          ✓ Save &amp; Link Photos
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- SHARE VIRTUAL ALBUM MODAL -->
+  <div id="share-album-modal" class="fixed inset-0 bg-black/80 hidden items-center justify-center z-50 p-4 backdrop-blur-sm">
+    <div style="background-color: var(--bg-panel); border-color: var(--border-color);" class="border p-6 rounded-2xl w-full max-w-lg shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b pb-3" style="border-color: var(--border-color);">
+        <div>
+          <h3 class="text-sm font-bold flex items-center gap-2"><span>🔗</span> Share Virtual Album (Secured Link &amp; Passcode)</h3>
+          <p class="text-[11px] text-zinc-400 mt-0.5">Generates a read-only link + auto-generated 4-digit passcode from existing database files.</p>
+        </div>
+        <button onclick="closeShareModal()" class="text-zinc-400 hover:text-white text-sm px-1">✕</button>
+      </div>
+
+      <div class="space-y-3">
+        <div>
+          <label class="block text-[11px] text-zinc-400 mb-1 font-medium">Virtual Album Title to Share</label>
+          <input id="share-modal-album-name" type="text" placeholder="e.g. Japan Highlights Share"
+                 style="background-color: var(--bg-input); border-color: var(--border-color);"
+                 class="w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500" />
+        </div>
+        <div class="flex items-center justify-between text-[11px] bg-blue-500/10 border border-blue-500/25 rounded-xl px-3 py-2 text-blue-300">
+          <span id="share-modal-source-summary">Sharing linked photos from existing database</span>
+          <button onclick="generateSecuredShareLink()" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg text-xs transition shadow shrink-0">
+            🔐 Generate Link &amp; Passcode
+          </button>
+        </div>
+      </div>
+
+      <!-- GENERATED SHARE RESULT CARD -->
+      <div id="share-generated-result" class="hidden bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4 space-y-3">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-bold text-emerald-400">✓ Secured Share Link Created!</span>
+          <span id="share-result-count" class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono"></span>
+        </div>
+
+        <div class="space-y-1">
+          <label class="text-[10px] text-zinc-400 uppercase font-semibold">Secured Share Link</label>
+          <div class="flex items-center gap-2">
+            <input id="share-result-url" type="text" readonly style="background-color: var(--bg-input); border-color: var(--border-color);" class="flex-1 border rounded-lg px-2.5 py-1.5 text-xs font-mono text-blue-400 focus:outline-none" />
+            <button onclick="copyShareField('share-result-url', this)" class="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg text-[11px] font-medium border border-zinc-700">📋 Copy Link</button>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-between bg-zinc-950/80 border border-zinc-800 rounded-xl p-3">
+          <div>
+            <div class="text-[10px] text-zinc-400 uppercase font-semibold">Auto-Generated 4-Digit Passcode</div>
+            <div class="text-[11px] text-zinc-500 mt-0.5">Required by recipient to unlock the virtual album</div>
+          </div>
+          <div class="flex items-center gap-2">
+            <span id="share-result-passcode" class="px-3 py-1.5 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 font-mono text-base font-bold tracking-[0.25em]">0000</span>
+            <button onclick="copySharePasscode(this)" class="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg text-[11px] font-medium border border-zinc-700">📋 Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ACTIVE SHARED LINKS LIST -->
+      <div class="space-y-2 pt-2 border-t" style="border-color: var(--border-color);">
+        <div class="text-xs font-bold text-zinc-300">Active Shared Virtual Albums</div>
+        <div id="active-shares-list" class="space-y-2 max-h-48 overflow-y-auto"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- AUTO-HIDE SIDEBAR -->
   <aside id="sidebar" style="background-color: var(--bg-panel); border-color: var(--border-color);" class="fixed top-0 bottom-0 left-0 w-72 border-r z-40 flex shadow-2xl backdrop-blur">
     <div class="flex-1 flex flex-col p-4 overflow-hidden">
@@ -152,9 +285,12 @@
           <button id="sort-toggle-btn" onclick="toggleDateSort()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="text-[10px] px-1.5 py-0.5 rounded border text-blue-400 border-blue-500/60 hover:border-blue-500 transition" title="Sort by Date (ASC / DESC)">📅 Date ↑</button>
         </div>
       </div>
-      <div class="mt-2.5 mb-2 relative flex items-center">
-        <input id="folder-filter-input" type="text" placeholder="Filter folders..." oninput="handleFolderSearch(this.value)" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-2.5 py-1 pr-6 text-[11px] focus:outline-none focus:border-blue-500" />
-        <button id="clear-folder-filter-btn" onclick="clearFolderSearch()" class="hidden absolute right-2 text-zinc-400 hover:text-red-500 text-[10px]">✕</button>
+      <div class="mt-2.5 mb-2 flex items-center gap-1.5">
+        <div class="relative flex-1 flex items-center">
+          <input id="folder-filter-input" type="text" placeholder="Filter folders..." oninput="handleFolderSearch(this.value)" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-2.5 py-1 pr-6 text-[11px] focus:outline-none focus:border-blue-500" />
+          <button id="clear-folder-filter-btn" onclick="clearFolderSearch()" class="hidden absolute right-2 text-zinc-400 hover:text-red-500 text-[10px]">✕</button>
+        </div>
+        <button onclick="openAddToAlbumModal(true)" title="Create Virtual Album" class="px-2 py-1 bg-blue-600/20 text-blue-400 border border-blue-500/30 hover:bg-blue-600 hover:text-white rounded-lg text-[10px] font-semibold transition shrink-0">+ Virtual</button>
       </div>
       <div class="flex-1 overflow-y-auto space-y-4">
         <div id="sidebar-albums-list" class="space-y-1"></div>
@@ -167,13 +303,23 @@
 
   <!-- MAIN VIEW WRAPPER -->
   <div class="flex-1 flex flex-col ml-[24px] h-screen overflow-hidden">
+    <!-- SHARED ALBUM READ-ONLY BANNER -->
+    <div id="shared-mode-banner" class="hidden bg-blue-950/90 border-b border-blue-500/30 px-6 py-2 items-center justify-between text-xs">
+      <div class="flex items-center gap-2">
+        <span class="px-2 py-0.5 rounded bg-blue-500/20 border border-blue-500/40 text-blue-300 font-semibold text-[10px]">🔒 Shared Virtual Album</span>
+        <span id="shared-banner-title" class="font-bold text-white"></span>
+        <span class="text-zinc-400 text-[11px]">• Linked read-only view from existing database</span>
+      </div>
+      <a href="/" class="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-[11px]">Exit Shared View</a>
+    </div>
+
     <!-- TOP NAVIGATION -->
     <header style="background-color: var(--bg-panel); border-color: var(--border-color);" class="h-16 border-b px-6 flex items-center justify-between z-20 gap-3">
-      <div class="flex items-center gap-3 shrink-0">
+      <div class="flex items-center gap-2.5 shrink-0">
         <h1 class="text-sm font-bold flex items-center gap-2"><span>📸</span> Memoria</h1>
         <div style="background-color: var(--bg-input); border-color: var(--border-color);" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border">
           <span class="text-zinc-400 text-[10px]">Album:</span>
-          <span id="active-album-title" class="font-bold text-blue-500 truncate max-w-[140px]">All Media</span>
+          <span id="active-album-title" class="font-bold text-blue-500 truncate max-w-[130px]">All Media</span>
         </div>
 
         <!-- AUTO-HIDE DATE FILTER TRIGGER -->
@@ -191,6 +337,17 @@
             <button onclick="resetDateFilter()" class="text-zinc-400 hover:text-red-500 font-bold px-1">✕</button>
           </div>
         </div>
+
+        <!-- PHOTO SELECTION & VIRTUAL ALBUM ACTIONS -->
+        <button id="btn-select-mode" onclick="toggleSelectionMode()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="border px-2.5 py-1.5 rounded-lg font-medium hover:border-blue-500 transition flex items-center gap-1" title="Select photos to link into a Virtual Album">
+          <span>☑️</span> <span id="select-btn-label">Select</span>
+        </button>
+        <button id="btn-add-to-album" onclick="openAddToAlbumModal()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="border px-2.5 py-1.5 rounded-lg font-medium hover:border-blue-500 transition flex items-center gap-1 text-blue-400" title="Add selected photos to an Album or new Virtual Folder">
+          <span>📁+</span> <span>Add to Album</span>
+        </button>
+        <button id="btn-share-album" onclick="openShareModal()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="border px-2.5 py-1.5 rounded-lg font-medium hover:border-emerald-500 transition flex items-center gap-1 text-emerald-400" title="Share Virtual Album with Secured Link & 4-Digit Passcode">
+          <span>🔗</span> <span>Share</span>
+        </button>
       </div>
 
       <!-- MIDDLE SEARCH BOX (MIN-WIDTH: 20px) -->
@@ -203,7 +360,7 @@
       </div>
 
       <!-- RIGHT CONTROLS -->
-      <div class="flex items-center gap-3 shrink-0">
+      <div class="flex items-center gap-2.5 shrink-0">
         <div style="background-color: var(--bg-input); border-color: var(--border-color);" class="flex items-center gap-1 border px-2 py-1 rounded-lg">
           <span class="text-[10px] text-zinc-400 font-semibold uppercase">Theme:</span>
           <select id="theme-selector" onchange="changeTheme(this.value)" class="bg-transparent focus:outline-none text-xs font-medium cursor-pointer">
@@ -224,13 +381,30 @@
           <button id="btn-globe" onclick="switchView('globe')" class="px-2.5 py-1 text-zinc-400 hover:text-white">Globe</button>
         </div>
 
-        <button onclick="openSettingsPage()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="border px-3 py-1.5 rounded-lg font-medium hover:border-blue-500 transition">
+        <button id="btn-settings-open" onclick="openSettingsPage()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="border px-3 py-1.5 rounded-lg font-medium hover:border-blue-500 transition">
           ⚙️ Settings
         </button>
 
-        <button onclick="logout()" class="text-zinc-400 hover:text-red-500 text-xs">Logout</button>
+        <button id="btn-logout" onclick="logout()" class="text-zinc-400 hover:text-red-500 text-xs">Logout</button>
       </div>
     </header>
+
+    <!-- SELECTION MODE ACTION BAR -->
+    <div id="selection-toolbar" class="hidden bg-blue-950/60 border-b border-blue-500/30 px-6 py-2 items-center justify-between z-10">
+      <div class="flex items-center gap-3">
+        <span id="selection-count-badge" class="px-2.5 py-0.5 rounded-full bg-blue-600 text-white font-bold text-[11px]">0 Selected</span>
+        <button onclick="selectAllCurrentPage()" class="text-[11px] text-blue-300 hover:text-white underline">Select All Shown</button>
+        <button onclick="clearPhotoSelection()" class="text-[11px] text-zinc-400 hover:text-white underline">Clear Selection</button>
+      </div>
+      <div class="flex items-center gap-2">
+        <button onclick="openAddToAlbumModal()" class="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-semibold text-xs transition shadow">
+          📁+ Add Selected to Album
+        </button>
+        <button onclick="openShareModal()" class="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-semibold text-xs transition shadow">
+          🔗 Share Selected (4-Digit Passcode)
+        </button>
+      </div>
+    </div>
 
     <!-- CONTENT VIEW -->
     <main class="flex-1 overflow-hidden relative">
@@ -264,17 +438,17 @@
       <div style="border-color: var(--border-color);" class="flex items-center justify-between pb-4 border-b">
         <div>
           <h2 class="text-xl font-bold">⚙️ Memoria Settings</h2>
-          <p class="text-zinc-400 text-xs">Configure source directories, database indexes, and lightbox behavior.</p>
+          <p class="text-zinc-400 text-xs">Configure source directories, virtual albums, database indexes, and security.</p>
         </div>
         <button onclick="closeSettingsPage()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-semibold transition text-xs shadow-md">✕ Close</button>
       </div>
 
-            <!-- ACCOUNT SECURITY SECTION -->
+      <!-- ACCOUNT SECURITY SECTION -->
       <section style="background-color: var(--bg-panel); border-color: var(--border-color);" class="p-6 rounded-2xl border space-y-4">
         <div class="flex items-center justify-between">
           <div>
             <h3 class="text-sm font-bold flex items-center gap-2">
-              <span>🔐</span> Account Security & Credentials
+              <span>🔐</span> Account Security &amp; Credentials
             </h3>
             <p class="text-zinc-400 text-[11px] mt-0.5">Update default administrator credentials to secure your vault access.</p>
           </div>
@@ -326,18 +500,32 @@
         <div id="network-urls-list" class="flex flex-wrap gap-2"></div>
       </section>
 
+      <!-- SOURCE DIRECTORIES & SMB SHARES -->
       <section style="background-color: var(--bg-panel); border-color: var(--border-color);" class="p-6 rounded-2xl border space-y-4">
         <div class="flex items-center justify-between">
-          <h3 class="text-sm font-bold">Source Directories & SMB Shares</h3>
+          <div>
+            <h3 class="text-sm font-bold">Source Directories &amp; SMB Shares</h3>
+            <p class="text-zinc-400 text-[11px] mt-0.5">Add or remove folder albums mapped to physical paths or SMB mounts.</p>
+          </div>
           <button onclick="addNewSourceRow()" class="px-3 py-1.5 bg-blue-600/20 text-blue-400 border border-blue-500/30 hover:bg-blue-600 hover:text-white rounded-lg transition text-xs font-semibold">+ Add Path</button>
         </div>
         <div class="space-y-2" id="source-paths-list"></div>
-        <button onclick="saveSourcesConfig()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg text-xs transition">Save Sources</button>
+        <div class="flex items-center justify-between pt-1">
+          <button onclick="saveSourcesConfig()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg text-xs transition">Save Sources</button>
+          <span id="sources-status-msg" class="text-xs font-medium"></span>
+        </div>
       </section>
 
+      <!-- RELOAD MEDIA INDEX -->
       <section style="background-color: var(--bg-panel); border-color: var(--border-color);" class="p-6 rounded-2xl border space-y-3">
-        <h3 class="text-sm font-bold">Reload Media Index</h3>
-        <button onclick="triggerDatabaseReindex()" class="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-lg text-xs transition">🔄 Reload Index & Sync Database</button>
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-sm font-bold">Reload Media Index</h3>
+            <p class="text-zinc-400 text-[11px] mt-0.5">Synchronize configured source folders and refresh the sidebar Album Catalog.</p>
+          </div>
+          <span id="sync-status-msg" class="text-xs font-medium"></span>
+        </div>
+        <button onclick="triggerDatabaseReindex()" class="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-lg text-xs transition">🔄 Reload Index &amp; Sync Database</button>
       </section>
     </div>
   </div>
@@ -370,6 +558,12 @@
     let activeLightboxInstance = null;
     let slideshowInterval = null;
 
+    // Selection & Shared Virtual Album state
+    let isSelectionMode = false;
+    let selectedMediaIds = new Set();
+    let isSharedReadOnlyMode = false;
+    let activeShareToken = null;
+
     let sourceConfigurations = [
       { id: 1, name: "Japan Travel", path: "/media_sources/photos" }
     ];
@@ -378,9 +572,9 @@
       try {
         const res = await fetch('/api/config');
         const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) {
+        if (Array.isArray(data)) {
           sourceConfigurations = data.map(s => ({
-            id: s.id || Date.now() + Math.random(),
+            id: s.id,
             name: s.album_name,
             path: s.path_location
           }));
@@ -446,18 +640,21 @@
     }
 
     async function loadAlbums() {
+      if (isSharedReadOnlyMode) return;
       try {
         const res = await fetch('/api/media/albums');
         const data = await res.json();
         allAlbums = (Array.isArray(data) ? data : []).map(a => {
           if (typeof a === 'string') {
-            return { album_name: a, min_date: '', max_date: '', count: 0 };
+            return { album_name: a, min_date: '', max_date: '', count: 0, is_virtual: false, source_id: null };
           }
           return {
             album_name: a.album_name,
             min_date: a.min_date || '',
             max_date: a.max_date || '',
-            count: a.count || 0
+            count: a.count || 0,
+            is_virtual: Boolean(a.is_virtual),
+            source_id: a.source_id || null
           };
         });
         renderAlbumsList();
@@ -549,13 +746,21 @@
       const allActive = currentAlbum === null ? 'bg-blue-600/20 text-blue-400 font-semibold' : 'hover:bg-zinc-800/40';
       const albumsHtml = filtered.map(a => {
         const isActive = currentAlbum === a.album_name ? 'bg-blue-600/20 text-blue-400 font-semibold' : 'hover:bg-zinc-800/40';
-        const safeName = a.album_name.replace(/'/g, "\\'");
+        const safeName = a.album_name.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
         const dateHint = a.min_date ? a.min_date.split(' ')[0] : '';
+        const icon = a.is_virtual ? '🗂️' : '📁';
+        const badge = a.is_virtual ? `<span class="text-[8px] px-1 py-0.2 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 shrink-0">Virtual</span>` : '';
         return `
-          <button onclick="selectAlbum('${safeName}')" class="w-full text-left px-2 py-1.5 rounded-lg transition flex items-center justify-between gap-2 ${isActive}">
-            <span class="truncate">📁 ${a.album_name}</span>
-            ${dateHint ? `<span class="text-[9px] text-zinc-500 font-mono shrink-0">${dateHint}</span>` : ''}
-          </button>
+          <div class="group flex items-center justify-between rounded-lg transition ${isActive}">
+            <button onclick="selectAlbum('${safeName}')" class="flex-1 text-left px-2 py-1.5 flex items-center justify-between gap-1.5 min-w-0">
+              <span class="truncate flex items-center gap-1"><span>${icon}</span> <span class="truncate">${a.album_name}</span> ${badge}</span>
+              <span class="text-[9px] text-zinc-500 font-mono shrink-0">${dateHint || (a.count + ' items')}</span>
+            </button>
+            <div class="hidden group-hover:flex items-center gap-0.5 pr-1.5 shrink-0">
+              <button onclick="event.stopPropagation(); openShareModal('${safeName}')" title="Share Album with 4-Digit Passcode" class="p-1 text-[10px] text-emerald-400 hover:bg-emerald-500/20 rounded">🔗</button>
+              <button onclick="event.stopPropagation(); removeAlbumFromCatalog('${safeName}', ${Boolean(a.is_virtual)}, ${a.source_id || 'null'})" title="Remove Album" class="p-1 text-[10px] text-rose-400 hover:bg-rose-500/20 rounded">🗑️</button>
+            </div>
+          </div>
         `;
       }).join('');
 
@@ -566,7 +771,33 @@
       ` + (filtered.length > 0 ? albumsHtml : `<div class="px-2 py-2 text-[11px] text-zinc-500 italic">No matching folders</div>`);
     }
 
+    async function removeAlbumFromCatalog(albumName, isVirtual, sourceId) {
+      try {
+        if (isVirtual && !sourceId) {
+          await fetch('/api/albums/virtual/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ album_name: albumName })
+          });
+        } else {
+          await fetch('/api/config/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: sourceId, album_name: albumName })
+          });
+          await loadSourcesConfig();
+        }
+        if (currentAlbum === albumName) {
+          currentAlbum = null;
+          document.getElementById('active-album-title').innerText = 'All Media';
+        }
+        await loadAlbums();
+        await applyFiltersAndPaging(0);
+      } catch (e) {}
+    }
+
     function selectAlbum(album) {
+      if (isSharedReadOnlyMode) return;
       currentAlbum = album;
       document.getElementById('active-album-title').innerText = album || 'All Media';
       renderAlbumsList();
@@ -579,6 +810,12 @@
     }
 
     async function applyFiltersAndPaging(newOffset = 0) {
+      if (isSharedReadOnlyMode) {
+        renderGrid();
+        renderPagination();
+        if (map) renderGlobePins();
+        return;
+      }
       offset = newOffset;
       const from = document.getElementById('date-from').value;
       const to = document.getElementById('date-to').value;
@@ -592,27 +829,369 @@
       try {
         const res = await fetch(url);
         const data = await res.json();
-        mediaItems = data.items;
-        totalItems = data.total;
+        mediaItems = data.items || [];
+        totalItems = data.total || 0;
         renderGrid();
         renderPagination();
         if (map) renderGlobePins();
       } catch (e) {}
     }
 
+    // PHOTO SELECTION & VIRTUAL ALBUM FUNCTIONS
+    function toggleSelectionMode() {
+      isSelectionMode = !isSelectionMode;
+      updateSelectionUI();
+      renderGrid();
+    }
+
+    function togglePhotoSelect(mediaId) {
+      if (selectedMediaIds.has(mediaId)) {
+        selectedMediaIds.delete(mediaId);
+      } else {
+        selectedMediaIds.add(mediaId);
+      }
+      updateSelectionUI();
+      renderGrid();
+    }
+
+    function selectAllCurrentPage() {
+      mediaItems.forEach(item => selectedMediaIds.add(item.id));
+      isSelectionMode = true;
+      updateSelectionUI();
+      renderGrid();
+    }
+
+    function clearPhotoSelection() {
+      selectedMediaIds.clear();
+      isSelectionMode = false;
+      updateSelectionUI();
+      renderGrid();
+    }
+
+    function updateSelectionUI() {
+      const toolbar = document.getElementById('selection-toolbar');
+      const badge = document.getElementById('selection-count-badge');
+      const btnSelect = document.getElementById('btn-select-mode');
+      const lbl = document.getElementById('select-btn-label');
+      const count = selectedMediaIds.size;
+
+      if (badge) badge.textContent = `${count} Selected`;
+      if (lbl) lbl.textContent = count > 0 ? `Select (${count})` : (isSelectionMode ? 'Selecting...' : 'Select');
+      if (btnSelect) {
+        btnSelect.className = (isSelectionMode || count > 0)
+          ? 'border px-2.5 py-1.5 rounded-lg font-semibold border-blue-500 bg-blue-600/20 text-blue-300 transition flex items-center gap-1'
+          : 'border px-2.5 py-1.5 rounded-lg font-medium hover:border-blue-500 transition flex items-center gap-1';
+      }
+      if (toolbar) {
+        if (isSelectionMode || count > 0) {
+          toolbar.classList.remove('hidden');
+          toolbar.classList.add('flex');
+        } else {
+          toolbar.classList.add('hidden');
+          toolbar.classList.remove('flex');
+        }
+      }
+    }
+
+    function openAddToAlbumModal(createEmpty = false) {
+      const modal = document.getElementById('add-album-modal');
+      const sel = document.getElementById('existing-album-select');
+      const sub = document.getElementById('add-album-selection-subtitle');
+      const status = document.getElementById('add-album-status');
+      if (status) status.classList.add('hidden');
+
+      const count = selectedMediaIds.size;
+      if (sub) {
+        sub.textContent = count > 0
+          ? `Linking ${count} selected photo(s) from the database into an album.`
+          : `Create a new Virtual Folder (select photos in the grid anytime to link them).`;
+      }
+
+      if (sel) {
+        sel.innerHTML = `<option value="">-- Or type a new Virtual Album name below --</option>` +
+          allAlbums.map(a => `<option value="${a.album_name.replace(/"/g, '&quot;')}">${a.is_virtual ? '🗂️ ' : '📁 '}${a.album_name} (${a.count})</option>`).join('');
+      }
+      document.getElementById('new-virtual-album-name').value = '';
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+    }
+
+    function closeAddToAlbumModal() {
+      const modal = document.getElementById('add-album-modal');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }
+
+    async function submitAddToVirtualAlbum() {
+      const existingName = document.getElementById('existing-album-select').value.trim();
+      const newName = document.getElementById('new-virtual-album-name').value.trim();
+      const autoShare = document.getElementById('add-album-auto-share').checked;
+      const status = document.getElementById('add-album-status');
+      const targetAlbum = newName || existingName;
+
+      if (!targetAlbum) {
+        status.className = 'text-xs text-rose-400 font-medium block';
+        status.textContent = 'Please select an existing album or enter a new Virtual Album name.';
+        return;
+      }
+
+      const ids = Array.from(selectedMediaIds);
+      try {
+        const res = await fetch('/api/albums/virtual', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ album_name: targetAlbum, media_ids: ids })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          await loadAlbums();
+          currentAlbum = targetAlbum;
+          document.getElementById('active-album-title').innerText = targetAlbum;
+          renderAlbumsList();
+          await applyFiltersAndPaging(0);
+          closeAddToAlbumModal();
+          if (autoShare) {
+            openShareModal(targetAlbum, ids);
+          } else {
+            clearPhotoSelection();
+          }
+        } else {
+          status.className = 'text-xs text-rose-400 font-medium block';
+          status.textContent = data.error || 'Failed to save virtual album.';
+        }
+      } catch (e) {
+        status.className = 'text-xs text-rose-400 font-medium block';
+        status.textContent = 'Network error saving virtual album.';
+      }
+    }
+
+    // SHARE VIRTUAL ALBUM (SECURED LINK & 4-DIGIT PASSCODE)
+    let pendingShareMediaIds = [];
+
+    async function openShareModal(albumOverride = null, explicitMediaIds = null) {
+      const modal = document.getElementById('share-album-modal');
+      const nameInput = document.getElementById('share-modal-album-name');
+      const summary = document.getElementById('share-modal-source-summary');
+      const resCard = document.getElementById('share-generated-result');
+      resCard.classList.add('hidden');
+
+      if (explicitMediaIds && explicitMediaIds.length > 0) {
+        pendingShareMediaIds = explicitMediaIds;
+      } else if (selectedMediaIds.size > 0 && !albumOverride) {
+        pendingShareMediaIds = Array.from(selectedMediaIds);
+      } else {
+        pendingShareMediaIds = [];
+      }
+
+      const defaultTitle = albumOverride || currentAlbum || (pendingShareMediaIds.length > 0 ? `Shared Selection (${pendingShareMediaIds.length} Photos)` : 'All Media Highlights');
+      nameInput.value = defaultTitle;
+
+      if (pendingShareMediaIds.length > 0) {
+        summary.textContent = `Sharing ${pendingShareMediaIds.length} selected photo(s) linked from existing database`;
+      } else if (albumOverride || currentAlbum) {
+        summary.textContent = `Sharing all linked photos in album "${albumOverride || currentAlbum}"`;
+      } else {
+        pendingShareMediaIds = mediaItems.map(m => m.id);
+        summary.textContent = `Sharing ${pendingShareMediaIds.length} photo(s) from current view`;
+      }
+
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+      await loadActiveSharesList();
+    }
+
+    function closeShareModal() {
+      const modal = document.getElementById('share-album-modal');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }
+
+    async function generateSecuredShareLink() {
+      const albumName = document.getElementById('share-modal-album-name').value.trim() || 'Shared Virtual Album';
+      const idsToSend = pendingShareMediaIds.length > 0 ? pendingShareMediaIds : (currentAlbum ? [] : mediaItems.map(m => m.id));
+
+      try {
+        const res = await fetch('/api/share', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            album_name: albumName,
+            media_ids: idsToSend
+          })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          const fullUrl = `${window.location.origin}/?share=${data.share_token}`;
+          document.getElementById('share-result-url').value = fullUrl;
+          document.getElementById('share-result-passcode').textContent = data.passcode;
+          document.getElementById('share-result-count').textContent = `${data.media_count} linked photos`;
+          document.getElementById('share-generated-result').classList.remove('hidden');
+          await loadAlbums();
+          await loadActiveSharesList();
+        } else {
+          alert(data.error || 'Could not generate share link.');
+        }
+      } catch (e) {
+        alert('Error generating share link.');
+      }
+    }
+
+    function copyShareField(inputId, btn) {
+      const inp = document.getElementById(inputId);
+      if (!inp) return;
+      navigator.clipboard.writeText(inp.value);
+      const orig = btn.textContent;
+      btn.textContent = '✓ Copied!';
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    }
+
+    function copySharePasscode(btn) {
+      const code = document.getElementById('share-result-passcode').textContent.trim();
+      navigator.clipboard.writeText(code);
+      const orig = btn.textContent;
+      btn.textContent = '✓ Copied!';
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    }
+
+    async function loadActiveSharesList() {
+      const container = document.getElementById('active-shares-list');
+      if (!container) return;
+      try {
+        const res = await fetch('/api/share/list');
+        const list = await res.json();
+        if (!Array.isArray(list) || list.length === 0) {
+          container.innerHTML = `<div class="text-[11px] text-zinc-500 italic py-2">No active shared virtual album links yet.</div>`;
+          return;
+        }
+        container.innerHTML = list.map(s => {
+          const fullUrl = `${window.location.origin}/?share=${s.share_token}`;
+          return `
+            <div style="background-color: var(--bg-input); border-color: var(--border-color);" class="border rounded-xl p-2.5 flex items-center justify-between gap-2">
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2">
+                  <span class="font-bold text-xs truncate">${s.album_name}</span>
+                  <span class="text-[10px] px-1.5 py-0.2 rounded bg-blue-500/20 text-blue-300 font-mono">${s.media_count} items</span>
+                  <span class="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-mono font-bold">Passcode: ${s.passcode}</span>
+                </div>
+                <div class="text-[10px] text-zinc-400 font-mono truncate mt-0.5">${fullUrl}</div>
+              </div>
+              <div class="flex items-center gap-1 shrink-0">
+                <button onclick="navigator.clipboard.writeText('${fullUrl}')" class="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded text-[10px]">Copy URL</button>
+                <button onclick="deleteShareLink('${s.share_token}')" class="px-2 py-1 bg-rose-500/20 hover:bg-rose-600 text-rose-300 hover:text-white rounded text-[10px]">🗑️</button>
+              </div>
+            </div>
+          `;
+        }).join('');
+      } catch (e) {}
+    }
+
+    async function deleteShareLink(token) {
+      await fetch('/api/share/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ share_token: token })
+      });
+      await loadActiveSharesList();
+    }
+
+    async function initSharedAlbumGate(token) {
+      activeShareToken = token;
+      document.getElementById('login-modal').classList.add('hidden');
+      const gate = document.getElementById('share-gate-modal');
+      gate.classList.remove('hidden');
+      gate.classList.add('flex');
+
+      try {
+        const res = await fetch(`/api/share/info?token=${encodeURIComponent(token)}`);
+        const data = await res.json();
+        const titleEl = document.getElementById('share-gate-album-title');
+        if (res.ok && data.exists) {
+          titleEl.textContent = `${data.album_name} (${data.media_count} linked photos)`;
+        } else {
+          titleEl.textContent = 'Shared Link Not Found or Revoked';
+          titleEl.className = 'text-xs text-rose-400 font-semibold';
+        }
+      } catch (e) {}
+    }
+
+    async function verifySharedAlbumPasscode() {
+      const code = document.getElementById('share-gate-passcode').value.trim();
+      const errEl = document.getElementById('share-gate-error');
+      errEl.classList.add('hidden');
+
+      if (code.length !== 4) {
+        errEl.textContent = 'Please enter the 4-digit numeric passcode.';
+        errEl.classList.remove('hidden');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/share/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ share_token: activeShareToken, passcode: code })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          isSharedReadOnlyMode = true;
+          mediaItems = data.items || [];
+          totalItems = data.total || mediaItems.length;
+          currentAlbum = data.album_name;
+
+          document.getElementById('share-gate-modal').classList.add('hidden');
+          document.getElementById('share-gate-modal').classList.remove('flex');
+          document.getElementById('active-album-title').innerText = data.album_name;
+
+          const banner = document.getElementById('shared-mode-banner');
+          banner.classList.remove('hidden');
+          banner.classList.add('flex');
+          document.getElementById('shared-banner-title').textContent = `${data.album_name} (${totalItems} photos)`;
+
+          // Hide owner modification controls in shared read-only view
+          ['btn-select-mode', 'btn-add-to-album', 'btn-share-album', 'btn-settings-open', 'btn-logout', 'sidebar'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.classList.add('hidden');
+          });
+
+          renderGrid();
+          renderPagination();
+        } else {
+          errEl.textContent = data.error || 'Invalid 4-digit passcode.';
+          errEl.classList.remove('hidden');
+        }
+      } catch (e) {
+        errEl.textContent = 'Error verifying passcode.';
+        errEl.classList.remove('hidden');
+      }
+    }
+
     function renderGrid() {
       const container = document.getElementById('media-grid');
-      container.innerHTML = mediaItems.map((item, idx) => `
-        <div style="background-color: var(--card-bg); border-color: var(--border-color);" 
-             class="group relative aspect-square rounded-xl overflow-hidden border hover:border-blue-500 transition duration-200 cursor-pointer shadow-sm"
-             onclick="openPhotoViewer(${idx})">
-          <img src="/api/stream/file/${item.id}" class="w-full h-full object-cover group-hover:scale-105 transition duration-300" />
-          <div class="absolute inset-0 bg-gradient-to-t from-black/85 via-black/25 to-transparent opacity-0 group-hover:opacity-100 transition p-2.5 flex flex-col justify-end text-white">
-            <span class="font-semibold truncate text-[11px]">${item.album_name}</span>
-            <span class="text-[9px] text-zinc-300">${item.date_taken || ''}</span>
+      container.innerHTML = mediaItems.map((item, idx) => {
+        const isSelected = selectedMediaIds.has(item.id);
+        const cardBorder = isSelected ? 'ring-2 ring-blue-500 border-blue-500' : 'hover:border-blue-500';
+        const checkVisibility = (isSelectionMode || isSelected) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100';
+        const checkBg = isSelected ? 'bg-blue-600 border-blue-400 text-white' : 'bg-black/60 border-white/60 text-transparent hover:border-blue-400';
+
+        return `
+          <div style="background-color: var(--card-bg); border-color: var(--border-color);" 
+               class="group relative aspect-square rounded-xl overflow-hidden border ${cardBorder} transition duration-200 cursor-pointer shadow-sm"
+               onclick="${isSelectionMode ? `togglePhotoSelect(${item.id})` : `openPhotoViewer(${idx})`}">
+            <img src="/api/stream/file/${item.id}" class="w-full h-full object-cover group-hover:scale-105 transition duration-300" />
+            ${!isSharedReadOnlyMode ? `
+              <button onclick="event.stopPropagation(); togglePhotoSelect(${item.id})"
+                      title="Select photo for Virtual Album / Sharing"
+                      class="absolute top-2 left-2 z-10 w-5 h-5 rounded-md border flex items-center justify-center text-[11px] font-bold transition ${checkVisibility} ${checkBg}">
+                ✓
+              </button>
+            ` : ''}
+            <div class="absolute inset-0 bg-gradient-to-t from-black/85 via-black/25 to-transparent opacity-0 group-hover:opacity-100 transition p-2.5 flex flex-col justify-end text-white pointer-events-none">
+              <span class="font-semibold truncate text-[11px]">${item.album_name}</span>
+              <span class="text-[9px] text-zinc-300">${item.date_taken || ''}</span>
+            </div>
           </div>
-        </div>
-      `).join('');
+        `;
+      }).join('');
     }
 
     function renderPagination() {
@@ -706,9 +1285,9 @@
                     <span class="text-[10px] text-blue-400 font-mono font-semibold">${d.album}</span>
                     ${locBadge}
                   </div>
-                  <button onclick="saveLightboxCaption(${d.id})" class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-bold transition">Save to SQLite</button>
+                  ${!isSharedReadOnlyMode ? `<button onclick="saveLightboxCaption(${d.id})" class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-bold transition">Save to SQLite</button>` : ''}
                 </div>
-                <textarea id="caption-edit-${d.id}" rows="2" class="w-full bg-zinc-950 border border-zinc-700 rounded p-2 text-xs text-zinc-100 mt-2 focus:outline-none focus:border-blue-500">${d.caption}</textarea>
+                <textarea id="caption-edit-${d.id}" rows="2" ${isSharedReadOnlyMode ? 'readonly' : ''} class="w-full bg-zinc-950 border border-zinc-700 rounded p-2 text-xs text-zinc-100 mt-2 focus:outline-none focus:border-blue-500">${d.caption}</textarea>
               `;
             };
             pswp.on('change', update);
@@ -1009,7 +1588,7 @@
       });
     }
 
-        async function updateAccountCredentials() {
+    async function updateAccountCredentials() {
       const currPass = document.getElementById("cred-curr-pass").value;
       const newUser = document.getElementById("cred-new-user").value.trim();
       const newPass = document.getElementById("cred-new-pass").value;
@@ -1078,40 +1657,126 @@
 
     function renderSettings() {
       const c = document.getElementById('source-paths-list');
+      if (!c) return;
       c.innerHTML = sourceConfigurations.map((s, idx) => `
-        <div class="flex gap-2">
-          <input type="text" value="${s.name}" oninput="sourceConfigurations[${idx}].name = this.value" class="border rounded p-1 text-xs bg-transparent flex-1" />
-          <input type="text" value="${s.path}" oninput="sourceConfigurations[${idx}].path = this.value" class="border rounded p-1 text-xs bg-transparent flex-1" />
+        <div class="flex items-center gap-2">
+          <input type="text" placeholder="Album / Folder Name" value="${(s.name || '').replace(/"/g, '&quot;')}" oninput="sourceConfigurations[${idx}].name = this.value" style="background-color: var(--bg-input); border-color: var(--border-color);" class="border rounded-lg px-3 py-1.5 text-xs flex-1 focus:outline-none focus:border-blue-500" />
+          <input type="text" placeholder="/media_sources/folder" value="${(s.path || '').replace(/"/g, '&quot;')}" oninput="sourceConfigurations[${idx}].path = this.value" style="background-color: var(--bg-input); border-color: var(--border-color);" class="border rounded-lg px-3 py-1.5 text-xs flex-1 font-mono focus:outline-none focus:border-blue-500" />
+          <button onclick="removeSourceRow(${idx})" title="Remove Album / Source Directory" class="px-2.5 py-1.5 rounded-lg border border-rose-500/30 bg-rose-500/10 hover:bg-rose-600 text-rose-400 hover:text-white text-xs transition shrink-0">
+            🗑️
+          </button>
         </div>
       `).join('');
     }
 
     function addNewSourceRow() {
-      sourceConfigurations.push({ id: Date.now(), name: "New Folder", path: "/media_sources/photos" });
+      const nextNum = sourceConfigurations.length + 1;
+      sourceConfigurations.push({ id: null, name: `New Album ${nextNum}`, path: `/media_sources/nature` });
       renderSettings();
     }
 
+    async function removeSourceRow(idx) {
+      const removed = sourceConfigurations[idx];
+      sourceConfigurations.splice(idx, 1);
+      renderSettings();
+      const msg = document.getElementById('sources-status-msg');
+      try {
+        if (removed && (removed.id || removed.name)) {
+          await fetch('/api/config/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: removed.id, album_name: removed.name })
+          });
+        }
+        await loadSourcesConfig();
+        renderSettings();
+        if (removed && currentAlbum === removed.name) {
+          currentAlbum = null;
+          document.getElementById('active-album-title').innerText = 'All Media';
+        }
+        await loadAlbums();
+        await applyFiltersAndPaging(0);
+        if (msg) {
+          msg.className = 'text-xs text-emerald-400 font-medium';
+          msg.textContent = `✓ Removed "${removed ? removed.name : 'Album'}" and updated catalog.`;
+        }
+      } catch (e) {}
+    }
+
     async function saveSourcesConfig() {
-      await fetch('/api/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(sourceConfigurations.map(s => ({
-          album_name: s.name,
-          path_location: s.path
-        })))
-      });
-      alert('Sources saved!');
+      const msg = document.getElementById('sources-status-msg');
+      try {
+        const res = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(sourceConfigurations.map(s => ({
+            id: s.id || null,
+            album_name: s.name,
+            path_location: s.path
+          })))
+        });
+        if (res.ok) {
+          await loadSourcesConfig();
+          renderSettings();
+          await loadAlbums();
+          await applyFiltersAndPaging(0);
+          if (msg) {
+            msg.className = 'text-xs text-emerald-400 font-medium';
+            msg.textContent = '✓ Sources saved & Album Catalog updated!';
+          }
+        }
+      } catch (e) {
+        if (msg) {
+          msg.className = 'text-xs text-rose-400 font-medium';
+          msg.textContent = 'Error saving sources.';
+        }
+      }
     }
 
     async function triggerDatabaseReindex() {
-      await fetch('/api/sync', { method: 'POST' });
-      alert('Sync dispatched! Refresh in a few seconds.');
+      const syncMsg = document.getElementById('sync-status-msg');
+      if (syncMsg) {
+        syncMsg.className = 'text-xs text-blue-400 font-medium';
+        syncMsg.textContent = '⏳ Syncing sources & reloading index...';
+      }
+      try {
+        const res = await fetch('/api/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sources: sourceConfigurations.map(s => ({
+              id: s.id || null,
+              album_name: s.name,
+              path_location: s.path
+            }))
+          })
+        });
+        const data = await res.json();
+        await loadSourcesConfig();
+        renderSettings();
+        await loadAlbums();
+        await applyFiltersAndPaging(0);
+        if (syncMsg) {
+          syncMsg.className = 'text-xs text-emerald-400 font-medium';
+          syncMsg.textContent = `✓ Reload complete! ${allAlbums.length} album(s) active in folder list.`;
+        }
+      } catch (e) {
+        if (syncMsg) {
+          syncMsg.className = 'text-xs text-rose-400 font-medium';
+          syncMsg.textContent = 'Error reloading index.';
+        }
+      }
     }
 
     const urlParams = new URLSearchParams(window.location.search);
     const viewParam = urlParams.get('view');
+    const shareParam = urlParams.get('share');
 
     function initFromUrl() {
+      if (shareParam) {
+        initSharedAlbumGate(shareParam);
+        return;
+      }
       if (sessionStorage.getItem('auth') || viewParam) {
         if (viewParam !== 'login') {
           document.getElementById('login-modal').classList.add('hidden');
