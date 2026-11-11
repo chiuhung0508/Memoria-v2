@@ -123,6 +123,34 @@
       box-shadow: 0 16px 36px rgba(0,0,0,0.65);
       pointer-events: auto;
     }
+
+    /* Keep original image aspect ratio inside PhotoSwipe viewer */
+    .pswp__img {
+      object-fit: contain !important;
+    }
+
+    /* EXIF Info Panel: clear of right arrow (right arrow sits at right:10px..60px) */
+    .custom-pswp-exif {
+      position: absolute;
+      top: 64px;
+      right: 88px;
+      bottom: 28px;
+      width: 410px;
+      max-width: calc(100vw - 140px);
+      background: rgba(15, 15, 20, 0.95);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 16px;
+      padding: 18px 20px;
+      display: flex;
+      flex-direction: column;
+      z-index: 999;
+      box-shadow: 0 20px 44px rgba(0,0,0,0.75);
+      pointer-events: auto;
+      font-size: 13px;
+      line-height: 1.45;
+      color: #f4f4f5;
+    }
   </style>
 </head>
 <body class="flex h-screen overflow-hidden text-xs select-none">
@@ -409,7 +437,7 @@
     <!-- CONTENT VIEW -->
     <main class="flex-1 overflow-hidden relative">
       <div id="view-grid" class="h-full overflow-y-auto p-6">
-        <div id="media-grid" class="grid grid-cols-6 gap-3"></div>
+        <div id="media-grid" style="grid-template-columns: repeat(6, minmax(0, 1fr));" class="grid gap-3"></div>
       </div>
 
       <div id="view-globe" class="h-full w-full hidden">
@@ -1183,9 +1211,9 @@
 
         return `
           <div style="background-color: var(--card-bg); border-color: var(--border-color);" 
-               class="group relative aspect-square rounded-xl overflow-hidden border ${cardBorder} transition duration-200 cursor-pointer shadow-sm"
+               class="group relative aspect-square rounded-xl overflow-hidden border ${cardBorder} transition duration-200 cursor-pointer shadow-sm flex items-center justify-center"
                onclick="${isSelectionMode ? `togglePhotoSelect(${item.id})` : `openPhotoViewer(${idx})`}">
-            <img src="/api/stream/file/${item.id}" class="w-full h-full object-cover group-hover:scale-105 transition duration-300" />
+            <img src="/api/stream/file/${item.id}" class="w-full h-full object-contain bg-black/30 group-hover:scale-105 transition duration-300" />
             ${!isSharedReadOnlyMode ? `
               <button onclick="event.stopPropagation(); togglePhotoSelect(${item.id})"
                       title="Select photo for Virtual Album / Sharing"
@@ -1218,8 +1246,12 @@
     }
 
     function changeGridZoom(cols) {
-      document.getElementById('zoom-val-label').innerText = cols;
-      document.getElementById('media-grid').className = `grid grid-cols-${cols} gap-3`;
+      const c = Math.max(1, Math.min(12, parseInt(cols, 10) || 6));
+      document.getElementById('zoom-val-label').innerText = c;
+      const grid = document.getElementById('media-grid');
+      if (grid) {
+        grid.style.gridTemplateColumns = `repeat(${c}, minmax(0, 1fr))`;
+      }
     }
 
     function handleGlobalSearch(val) {
@@ -1235,20 +1267,150 @@
       applyFiltersAndPaging(0);
     }
 
+    let isCaptionEditMode = false;
+    let isExifWindowVisible = false;
+    let renderActiveCaptionPanel = null;
+    let renderActiveExifPanel = null;
+
+    function toggleCaptionEditMode(editState) {
+      isCaptionEditMode = Boolean(editState);
+      if (renderActiveCaptionPanel) renderActiveCaptionPanel();
+    }
+
+    function closeCaptionPanel() {
+      isCaptionWindowVisible = false;
+      isCaptionEditMode = false;
+      const p = document.querySelector('.custom-pswp-caption');
+      if (p) p.style.display = 'none';
+    }
+
+    function closeExifPanel() {
+      isExifWindowVisible = false;
+      const p = document.querySelector('.custom-pswp-exif');
+      if (p) p.style.display = 'none';
+    }
+
+    function buildExifPanelHtml(d) {
+      const ex = d.exif || {};
+      const cam = ex.camera_info || {};
+      const prop = ex.image_properties || {};
+      const gps = ex.gps_data || {};
+      const copy = ex.copyright_info || {};
+      const otherData = ex.other_data || {};
+      const sw = ex.processing_software || {};
+      const otherList = Array.isArray(ex.other) ? ex.other : [];
+
+      const hasGps = (d.latitude != null && d.longitude != null) || (gps.raw_lat != null && gps.raw_lon != null);
+      const latNum = d.latitude != null ? Number(d.latitude) : (gps.raw_lat != null ? Number(gps.raw_lat) : null);
+      const lonNum = d.longitude != null ? Number(d.longitude) : (gps.raw_lon != null ? Number(gps.raw_lon) : null);
+      const gmapsUrl = hasGps ? `https://www.google.com/maps?q=${latNum},${lonNum}` : null;
+
+      const row = (label, val) => `
+        <div class="flex items-start justify-between gap-3 py-1 border-b border-zinc-800/70 last:border-b-0">
+          <span class="text-zinc-400 shrink-0">${label}</span>
+          <span class="text-zinc-100 font-medium text-right break-all">${val || '—'}</span>
+        </div>
+      `;
+
+      const otherRowsHtml = otherList.length > 0
+        ? otherList.map(item => row(item.label, item.value)).join('')
+        : row('Additional Tags', 'Standard EXIF Profile');
+
+      return `
+        <div class="flex items-center justify-between border-b border-zinc-700/80 pb-3 mb-3 shrink-0">
+          <div class="flex items-center gap-2">
+            <span class="text-base">ℹ️</span>
+            <div>
+              <div class="font-bold text-sm text-white">EXIF &amp; Image Metadata</div>
+              <div class="text-[11px] text-zinc-400">Pre-indexed in SQLite for instant loading</div>
+            </div>
+          </div>
+          <button onclick="closeExifPanel()" class="px-2 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs font-bold">✕</button>
+        </div>
+
+        <div class="flex-1 overflow-y-auto pr-1 space-y-3.5 select-text">
+          <!-- 1-Camera info -->
+          <div class="bg-zinc-900/90 border border-zinc-800 rounded-xl p-3">
+            <div class="text-xs font-bold uppercase tracking-wider text-blue-400 mb-1.5">1. Camera Info</div>
+            ${row('Make and model', cam.make_model)}
+            ${row('Lens', cam.lens)}
+            ${row('Focal length', cam.focal_length)}
+            ${row('Aperture', cam.aperture)}
+            ${row('Exposure', cam.exposure)}
+            ${row('ISO Speed', cam.iso_speed)}
+            ${row('Flash', cam.flash)}
+          </div>
+
+          <!-- 2-Image properties -->
+          <div class="bg-zinc-900/90 border border-zinc-800 rounded-xl p-3">
+            <div class="text-xs font-bold uppercase tracking-wider text-emerald-400 mb-1.5">2. Image Properties</div>
+            ${row('File name', prop.file_name)}
+            ${row('File size', prop.file_size)}
+            ${row('MIME type', prop.mime_type)}
+            ${row('Image size', prop.image_size || `${d.width} × ${d.height} px`)}
+            ${row('Color space', prop.color_space)}
+          </div>
+
+          <!-- 3-GPS data -->
+          <div class="bg-zinc-900/90 border border-zinc-800 rounded-xl p-3">
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="text-xs font-bold uppercase tracking-wider text-amber-400">3. GPS Data</span>
+              ${gmapsUrl ? `<a href="${gmapsUrl}" target="_blank" rel="noopener noreferrer" class="text-xs text-blue-400 hover:text-blue-300 underline font-semibold">🗺️ Google Maps ↗</a>` : ''}
+            </div>
+            ${row('Latitude', gps.latitude)}
+            ${row('Longitude', gps.longitude)}
+            ${row('Altitude', gps.altitude)}
+            ${row('Direction and speed', gps.direction_speed)}
+          </div>
+
+          <!-- 4-Copyright info -->
+          <div class="bg-zinc-900/90 border border-zinc-800 rounded-xl p-3">
+            <div class="text-xs font-bold uppercase tracking-wider text-purple-400 mb-1.5">4. Copyright Info</div>
+            ${row('Creator', copy.creator)}
+            ${row('Copyright', copy.copyright)}
+            ${row('Right holder', copy.right_holder)}
+            ${row('Legal notice', copy.legal_notice)}
+          </div>
+
+          <!-- 5-Other data -->
+          <div class="bg-zinc-900/90 border border-zinc-800 rounded-xl p-3">
+            <div class="text-xs font-bold uppercase tracking-wider text-cyan-400 mb-1.5">5. Other Data</div>
+            ${row('Date and time', otherData.date_time || d.date_taken)}
+            ${row('Thumbnails', otherData.thumbnails)}
+          </div>
+
+          <!-- 6-Processing software -->
+          <div class="bg-zinc-900/90 border border-zinc-800 rounded-xl p-3">
+            <div class="text-xs font-bold uppercase tracking-wider text-pink-400 mb-1.5">6. Processing Software</div>
+            ${row('Software', sw.software)}
+          </div>
+
+          <!-- 7-Other (if any) -->
+          <div class="bg-zinc-900/90 border border-zinc-800 rounded-xl p-3">
+            <div class="text-xs font-bold uppercase tracking-wider text-zinc-300 mb-1.5">7. Other (Additional EXIF)</div>
+            ${otherRowsHtml}
+          </div>
+        </div>
+      `;
+    }
+
     function openPhotoViewer(index) {
       if (!window.PhotoSwipe) {
         setTimeout(() => openPhotoViewer(index), 100);
         return;
       }
+      isCaptionEditMode = false;
       const pswpItems = mediaItems.map(m => ({
         src: `/api/stream/file/${m.id}`,
-        width: 1600,
-        height: 1000,
+        width: m.width || 1200,
+        height: m.height || 800,
         id: m.id,
         album: m.album_name,
+        date_taken: m.date_taken || '',
         caption: m.caption || '',
         latitude: m.latitude,
-        longitude: m.longitude
+        longitude: m.longitude,
+        exif: m.exif || {}
       }));
 
       const pswp = new window.PhotoSwipe({
@@ -1259,46 +1421,156 @@
 
       activeLightboxInstance = pswp;
 
+      // Dynamically ensure exact natural aspect ratio if image dimensions weren't cached yet
+      pswp.on('contentLoad', (e) => {
+        const { content } = e;
+        if (content && content.element && content.element.tagName === 'IMG') {
+          const imgEl = content.element;
+          const syncNaturalSize = () => {
+            if (imgEl.naturalWidth && imgEl.naturalHeight) {
+              if (content.data.width !== imgEl.naturalWidth || content.data.height !== imgEl.naturalHeight) {
+                content.data.width = imgEl.naturalWidth;
+                content.data.height = imgEl.naturalHeight;
+                content.width = imgEl.naturalWidth;
+                content.height = imgEl.naturalHeight;
+                pswp.updateSize(true);
+              }
+            }
+          };
+          if (imgEl.complete) {
+            syncNaturalSize();
+          } else {
+            imgEl.addEventListener('load', syncNaturalSize, { once: true });
+          }
+        }
+      });
+
       pswp.on('uiRegister', function() {
+        // 1. Caption Toggle Icon (💬)
         pswp.ui.registerElement({
           name: 'caption-toggle-button',
           order: 7,
           isButton: true,
-          html: `<span class="text-base">💬</span>`,
+          html: `<span class="text-base" title="View / Edit Caption">💬</span>`,
           onClick: () => {
             isCaptionWindowVisible = !isCaptionWindowVisible;
+            isCaptionEditMode = false;
             const p = document.querySelector('.custom-pswp-caption');
-            if (p) p.style.display = isCaptionWindowVisible ? 'flex' : 'none';
+            if (p) {
+              p.style.display = isCaptionWindowVisible ? 'flex' : 'none';
+              if (isCaptionWindowVisible && renderActiveCaptionPanel) renderActiveCaptionPanel();
+            }
           }
         });
 
+        // 2. Info / EXIF Metadata Icon (ℹ️) right next to Caption Icon
+        pswp.ui.registerElement({
+          name: 'exif-info-button',
+          order: 8,
+          isButton: true,
+          html: `<span class="text-base" title="EXIF & Image Metadata Info">ℹ️</span>`,
+          onClick: () => {
+            isExifWindowVisible = !isExifWindowVisible;
+            const p = document.querySelector('.custom-pswp-exif');
+            if (p) {
+              p.style.display = isExifWindowVisible ? 'flex' : 'none';
+              if (isExifWindowVisible && renderActiveExifPanel) renderActiveExifPanel();
+            }
+          }
+        });
+
+        // 3. Caption Panel (Default: View-Only Mode, Pen Icon to Edit & Save/Cancel, Google Maps Hyperlink on Geocode)
         pswp.ui.registerElement({
           name: 'custom-caption-panel',
           order: 9,
           appendTo: 'root',
           onInit: (el, pswp) => {
             el.className = 'custom-pswp-caption caption-placement-bottom';
-            el.style.display = 'none';
+            el.style.display = isCaptionWindowVisible ? 'flex' : 'none';
 
-            const update = () => {
+            const updateCaptionUI = () => {
+              if (!pswp.currSlide || !pswp.currSlide.data) return;
               const d = pswp.currSlide.data;
-              const hasGps = d.latitude && d.longitude;
-              const locBadge = hasGps 
-                ? `<span class="bg-blue-500/20 text-blue-300 border border-blue-500/30 px-2 py-0.5 rounded text-[10px]">📍 ${Number(d.latitude).toFixed(4)}, ${Number(d.longitude).toFixed(4)}</span>`
-                : `<span class="bg-zinc-800 text-zinc-400 border border-zinc-700 px-2 py-0.5 rounded text-[10px]">📍 No GPS Location</span>`;
+              const hasGps = d.latitude != null && d.longitude != null;
+              const latNum = hasGps ? Number(d.latitude) : 0;
+              const lonNum = hasGps ? Number(d.longitude) : 0;
+              const gmapsLink = `https://www.google.com/maps?q=${latNum},${lonNum}`;
 
-              el.innerHTML = `
-                <div class="flex items-center justify-between border-b border-zinc-700/60 pb-2">
-                  <div class="flex items-center gap-2">
-                    <span class="text-[10px] text-blue-400 font-mono font-semibold">${d.album}</span>
-                    ${locBadge}
+              const locBadge = hasGps 
+                ? `<a href="${gmapsLink}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation();"
+                      class="bg-blue-500/20 hover:bg-blue-500/35 text-blue-300 border border-blue-500/40 px-2.5 py-0.5 rounded-md text-xs inline-flex items-center gap-1 transition underline decoration-blue-400/60"
+                      title="Open GPS location in Google Maps">
+                     📍 ${latNum.toFixed(4)}, ${lonNum.toFixed(4)} ↗
+                   </a>`
+                : `<span class="bg-zinc-800 text-zinc-400 border border-zinc-700 px-2.5 py-0.5 rounded-md text-xs">📍 No GPS Location</span>`;
+
+              const safeCaption = (d.caption || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+              if (!isCaptionEditMode || isSharedReadOnlyMode) {
+                el.innerHTML = `
+                  <div class="flex items-center justify-between border-b border-zinc-700/70 pb-2.5">
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <span class="text-xs text-blue-400 font-mono font-semibold">${d.album}</span>
+                      ${locBadge}
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                      ${!isSharedReadOnlyMode ? `
+                        <button onclick="toggleCaptionEditMode(true)" title="Edit Caption"
+                                class="px-2.5 py-1 bg-zinc-800 hover:bg-blue-600 text-zinc-200 hover:text-white border border-zinc-700 rounded-lg text-xs font-medium transition flex items-center gap-1">
+                          <span>✏️</span> <span>Edit</span>
+                        </button>
+                      ` : ''}
+                      <button onclick="closeCaptionPanel()" title="Close Caption" class="px-2 py-1 text-zinc-400 hover:text-white text-xs">✕</button>
+                    </div>
                   </div>
-                  ${!isSharedReadOnlyMode ? `<button onclick="saveLightboxCaption(${d.id})" class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-bold transition">Save to SQLite</button>` : ''}
-                </div>
-                <textarea id="caption-edit-${d.id}" rows="2" ${isSharedReadOnlyMode ? 'readonly' : ''} class="w-full bg-zinc-950 border border-zinc-700 rounded p-2 text-xs text-zinc-100 mt-2 focus:outline-none focus:border-blue-500">${d.caption}</textarea>
-              `;
+                  <div class="pt-3 text-sm text-zinc-100 leading-relaxed select-text whitespace-pre-wrap">${safeCaption || '<span class="text-zinc-500 italic">No caption added yet. Click ✏️ Edit to write a note.</span>'}</div>
+                `;
+              } else {
+                el.innerHTML = `
+                  <div class="flex items-center justify-between border-b border-zinc-700/70 pb-2.5">
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <span class="text-xs text-blue-400 font-mono font-semibold">${d.album}</span>
+                      ${locBadge}
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                      <button onclick="saveLightboxCaption(${d.id})" class="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition shadow">
+                        💾 Save
+                      </button>
+                      <button onclick="toggleCaptionEditMode(false)" class="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white border border-zinc-700 rounded-lg text-xs font-medium transition">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                  <textarea id="caption-edit-${d.id}" rows="3" placeholder="Write a photo caption or story..."
+                            class="w-full bg-zinc-950 border border-blue-500/60 rounded-xl p-2.5 text-sm text-zinc-100 mt-2.5 focus:outline-none focus:border-blue-400">${safeCaption}</textarea>
+                `;
+              }
             };
-            pswp.on('change', update);
+
+            renderActiveCaptionPanel = updateCaptionUI;
+            pswp.on('change', () => {
+              isCaptionEditMode = false;
+              updateCaptionUI();
+            });
+          }
+        });
+
+        // 4. EXIF & Image Metadata Info Panel (7 Groups, Clear of Right Arrow)
+        pswp.ui.registerElement({
+          name: 'custom-exif-panel',
+          order: 10,
+          appendTo: 'root',
+          onInit: (el, pswp) => {
+            el.className = 'custom-pswp-exif';
+            el.style.display = isExifWindowVisible ? 'flex' : 'none';
+
+            const updateExifUI = () => {
+              if (!pswp.currSlide || !pswp.currSlide.data) return;
+              el.innerHTML = buildExifPanelHtml(pswp.currSlide.data);
+            };
+
+            renderActiveExifPanel = updateExifUI;
+            pswp.on('change', updateExifUI);
           }
         });
       });
@@ -1307,13 +1579,21 @@
     }
 
     async function saveLightboxCaption(id) {
-      const text = document.getElementById(`caption-edit-${id}`).value;
+      const textarea = document.getElementById(`caption-edit-${id}`);
+      if (!textarea) return;
+      const text = textarea.value;
       await fetch('/api/media/caption', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, caption: text })
       });
-      alert('Caption updated!');
+      if (activeLightboxInstance && activeLightboxInstance.currSlide && activeLightboxInstance.currSlide.data) {
+        activeLightboxInstance.currSlide.data.caption = text;
+      }
+      const item = mediaItems.find(m => m.id === id);
+      if (item) item.caption = text;
+      isCaptionEditMode = false;
+      if (renderActiveCaptionPanel) renderActiveCaptionPanel();
     }
 
     function switchView(view) {

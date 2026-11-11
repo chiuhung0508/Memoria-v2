@@ -20,7 +20,7 @@ except Exception:
     HAS_SMB = False
 
 try:
-    from PIL import Image, ExifTags
+    from PIL import Image, ExifTags, ImageOps
     HAS_PIL = True
 except Exception:
     HAS_PIL = False
@@ -71,10 +71,6 @@ def is_smb_path(raw_path):
 
 
 def parse_smb_path(raw_path):
-    """
-    Parses //server/share/subpath, \\\\server\\share\\subpath, or smb://server/share/subpath
-    into (server, share, subpath, normalized_display_path)
-    """
     if not raw_path:
         return None
     p = raw_path.strip()
@@ -126,12 +122,324 @@ def resolve_source_path(raw_path):
     return p
 
 
+def format_file_size(num_bytes):
+    if not num_bytes or num_bytes <= 0:
+        return "—"
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    elif num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.1f} KB ({num_bytes:,} bytes)"
+    else:
+        return f"{num_bytes / (1024 * 1024):.2f} MB ({num_bytes:,} bytes)"
+
+
+def _to_float(val):
+    try:
+        if hasattr(val, "numerator") and hasattr(val, "denominator"):
+            return float(val.numerator) / float(val.denominator) if val.denominator else 0.0
+        if isinstance(val, tuple) and len(val) == 2:
+            return float(val[0]) / float(val[1]) if val[1] else 0.0
+        return float(val)
+    except Exception:
+        return None
+
+
+def _clean_str(val):
+    if val is None:
+        return ""
+    if isinstance(val, bytes):
+        if val.startswith(b"ASCII\x00\x00\x00"):
+            val = val[8:]
+        try:
+            s = val.decode("utf-8", errors="ignore")
+        except Exception:
+            s = ""
+    else:
+        s = str(val)
+    if s.startswith("ASCII"):
+        s = s[5:]
+    return s.replace("\x00", "").strip()
+
+
+FLASH_MAP = {
+    0x00: "No Flash",
+    0x01: "Fired",
+    0x05: "Fired, Return not detected",
+    0x07: "Fired, Return detected",
+    0x08: "On, Did not fire",
+    0x09: "On, Fired",
+    0x0D: "On, Return not detected",
+    0x0F: "On, Return detected",
+    0x10: "Off, Did not fire",
+    0x18: "Auto, Did not fire",
+    0x19: "Auto, Fired",
+    0x1D: "Auto, Fired, Return not detected",
+    0x1F: "Auto, Fired, Return detected",
+    0x20: "No flash function",
+    0x41: "Fired, Red-eye reduction",
+    0x45: "Fired, Red-eye reduction, Return not detected",
+    0x47: "Fired, Red-eye reduction, Return detected",
+    0x49: "On, Red-eye reduction",
+    0x59: "Auto, Fired, Red-eye reduction"
+}
+
+METERING_MAP = {
+    0: "Unknown", 1: "Average", 2: "Center-weighted average",
+    3: "Spot", 4: "Multi-spot", 5: "Multi-segment (Pattern)", 6: "Partial"
+}
+
+EXPOSURE_PROG_MAP = {
+    0: "Not Defined", 1: "Manual", 2: "Normal Program", 3: "Aperture Priority",
+    4: "Shutter Priority", 5: "Creative Program", 6: "Action Program",
+    7: "Portrait Mode", 8: "Landscape Mode"
+}
+
+
+def extract_full_metadata(local_file_path, display_filename=None, fallback_dt=None, fallback_lat=None, fallback_lon=None):
+    """
+    Extracts image dimensions (width, height) and builds the 7-group structured EXIF dictionary
+    for persistence in the SQLite media table.
+    """
+    fname = display_filename or os.path.basename(local_file_path or "")
+    ext = os.path.splitext(fname)[1].lower()
+    mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+    mime_type = mime_map.get(ext, "image/jpeg")
+
+    fsize = 0
+    if local_file_path and os.path.exists(local_file_path):
+        try:
+            fsize = os.path.getsize(local_file_path)
+        except Exception:
+            fsize = 0
+
+    width, height = 0, 0
+    color_space = "sRGB"
+    has_thumb = "No embedded thumbnail"
+    raw_tags = {}
+    gps_tags = {}
+
+    if HAS_PIL and local_file_path and os.path.exists(local_file_path):
+        try:
+            with Image.open(local_file_path) as img:
+                width, height = img.size
+                mode = img.mode or "RGB"
+                # Collect EXIF tags
+                try:
+                    exif_obj = img.getexif()
+                    if exif_obj:
+                        for k, v in exif_obj.items():
+                            raw_tags[ExifTags.TAGS.get(k, str(k))] = v
+                        if hasattr(ExifTags, "IFD"):
+                            for ifd_enum in (ExifTags.IFD.Exif,):
+                                try:
+                                    sub_ifd = exif_obj.get_ifd(ifd_enum)
+                                    for k, v in sub_ifd.items():
+                                        raw_tags[ExifTags.TAGS.get(k, str(k))] = v
+                                except Exception:
+                                    pass
+                            try:
+                                gps_ifd = exif_obj.get_ifd(ExifTags.IFD.GPSInfo)
+                                for k, v in gps_ifd.items():
+                                    gps_tags[ExifTags.GPSTAGS.get(k, str(k))] = v
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+                # Fallback to _getexif() if needed
+                if not raw_tags and hasattr(img, "_getexif"):
+                    try:
+                        legacy = img._getexif() or {}
+                        for k, v in legacy.items():
+                            tname = ExifTags.TAGS.get(k, str(k))
+                            if tname == "GPSInfo" and isinstance(v, dict):
+                                for gk, gv in v.items():
+                                    gps_tags[ExifTags.GPSTAGS.get(gk, str(gk))] = gv
+                            else:
+                                raw_tags[tname] = v
+                    except Exception:
+                        pass
+
+                # Check Orientation to transpose width/height if rotated 90/270 deg
+                orient = raw_tags.get("Orientation")
+                if orient in (5, 6, 7, 8):
+                    width, height = height, width
+
+                cs_val = raw_tags.get("ColorSpace")
+                if cs_val == 1:
+                    color_space = f"sRGB ({mode})"
+                elif cs_val == 65535:
+                    color_space = f"Uncalibrated ({mode})"
+                else:
+                    color_space = f"{mode} (sRGB)"
+        except Exception:
+            pass
+
+    # 1. Camera info
+    make = _clean_str(raw_tags.get("Make"))
+    model = _clean_str(raw_tags.get("Model"))
+    if make and model:
+        make_model = model if model.lower().startswith(make.lower()) else f"{make} {model}"
+    else:
+        make_model = make or model or "—"
+
+    lens_make = _clean_str(raw_tags.get("LensMake"))
+    lens_model = _clean_str(raw_tags.get("LensModel") or raw_tags.get("LensSpecification"))
+    lens_str = f"{lens_make} {lens_model}".strip() if (lens_make or lens_model) else "—"
+
+    fl_val = _to_float(raw_tags.get("FocalLength"))
+    fl_35 = raw_tags.get("FocalLengthIn35mmFilm")
+    if fl_val:
+        focal_length = f"{fl_val:.1f} mm" + (f" ({fl_35} mm eq.)" if fl_35 else "")
+    else:
+        focal_length = "—"
+
+    fnum = _to_float(raw_tags.get("FNumber") or raw_tags.get("ApertureValue"))
+    aperture = f"f/{fnum:.1f}" if fnum else "—"
+
+    exp_val = raw_tags.get("ExposureTime")
+    exp_float = _to_float(exp_val)
+    if exp_float:
+        if exp_float < 1.0 and exp_float > 0:
+            denom = int(round(1.0 / exp_float))
+            exposure = f"1/{denom} sec"
+        else:
+            exposure = f"{exp_float:.2f} sec"
+    else:
+        exposure = "—"
+
+    iso_val = raw_tags.get("ISOSpeedRatings") or raw_tags.get("PhotographicSensitivity")
+    if isinstance(iso_val, (list, tuple)):
+        iso_val = iso_val[0] if iso_val else None
+    iso_str = f"ISO {iso_val}" if iso_val else "—"
+
+    flash_val = raw_tags.get("Flash")
+    flash_str = FLASH_MAP.get(int(flash_val), f"Mode {flash_val}") if isinstance(flash_val, int) else "—"
+
+    # 3. GPS data
+    lat = fallback_lat
+    lon = fallback_lon
+    if "GPSLatitude" in gps_tags and "GPSLatitudeRef" in gps_tags and "GPSLongitude" in gps_tags and "GPSLongitudeRef" in gps_tags:
+        try:
+            def dms_to_deg(dms):
+                return (_to_float(dms[0]) or 0.0) + ((_to_float(dms[1]) or 0.0) / 60.0) + ((_to_float(dms[2]) or 0.0) / 3600.0)
+            lat = round(dms_to_deg(gps_tags["GPSLatitude"]), 6)
+            if _clean_str(gps_tags["GPSLatitudeRef"]).upper() == "S":
+                lat = -lat
+            lon = round(dms_to_deg(gps_tags["GPSLongitude"]), 6)
+            if _clean_str(gps_tags["GPSLongitudeRef"]).upper() == "W":
+                lon = -lon
+        except Exception:
+            pass
+
+    alt_val = _to_float(gps_tags.get("GPSAltitude"))
+    alt_ref = gps_tags.get("GPSAltitudeRef", 0)
+    if alt_val is not None:
+        altitude_str = f"{alt_val:.1f} m {'Below' if alt_ref in (1, b'\\x01') else 'Above'} Sea Level"
+    else:
+        altitude_str = "—"
+
+    dir_val = _to_float(gps_tags.get("GPSImgDirection") or gps_tags.get("GPSTrack"))
+    spd_val = _to_float(gps_tags.get("GPSSpeed"))
+    spd_ref = _clean_str(gps_tags.get("GPSSpeedRef")) or "km/h"
+    dir_parts = []
+    if dir_val is not None:
+        dir_parts.append(f"{dir_val:.1f}°")
+    if spd_val is not None:
+        dir_parts.append(f"{spd_val:.1f} {spd_ref}")
+    dir_speed_str = " / ".join(dir_parts) if dir_parts else "—"
+
+    lat_str = f"{abs(lat):.5f}° {'N' if lat >= 0 else 'S'} ({lat:.5f})" if lat is not None else "—"
+    lon_str = f"{abs(lon):.5f}° {'E' if lon >= 0 else 'W'} ({lon:.5f})" if lon is not None else "—"
+
+    # 4. Copyright info
+    creator = _clean_str(raw_tags.get("Artist") or raw_tags.get("XPAuthor") or raw_tags.get("CameraOwnerName")) or "—"
+    copyright_txt = _clean_str(raw_tags.get("Copyright")) or "—"
+    right_holder = copyright_txt if copyright_txt != "—" else creator
+    legal_notice = _clean_str(raw_tags.get("ImageDescription") or raw_tags.get("UserComment")) or "—"
+
+    # 5. Other data
+    dt_raw = _clean_str(raw_tags.get("DateTimeOriginal") or raw_tags.get("DateTimeDigitized") or raw_tags.get("DateTime"))
+    if dt_raw and len(dt_raw) >= 10 and dt_raw[4] == ":":
+        dt_raw = dt_raw.replace(":", "-", 2)
+    date_taken = dt_raw or fallback_dt or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    has_thumb = "Embedded EXIF Thumbnail" if ("JPEGInterchangeFormat" in raw_tags or "ThumbnailImage" in raw_tags) else f"Standard Stream ({width}×{height})"
+
+    # 6. Processing software
+    software = _clean_str(raw_tags.get("Software") or raw_tags.get("ProcessingSoftware")) or "—"
+
+    # 7. Other (if any)
+    other_items = []
+    if "WhiteBalance" in raw_tags:
+        wb = raw_tags["WhiteBalance"]
+        other_items.append({"label": "White Balance", "value": "Manual" if wb == 1 else "Auto"})
+    if "MeteringMode" in raw_tags:
+        mm = raw_tags["MeteringMode"]
+        other_items.append({"label": "Metering Mode", "value": METERING_MAP.get(mm, str(mm))})
+    if "ExposureProgram" in raw_tags:
+        ep = raw_tags["ExposureProgram"]
+        other_items.append({"label": "Exposure Program", "value": EXPOSURE_PROG_MAP.get(ep, str(ep))})
+    if "ExposureBiasValue" in raw_tags:
+        eb = _to_float(raw_tags["ExposureBiasValue"])
+        if eb is not None:
+            other_items.append({"label": "Exposure Bias", "value": f"{eb:+.1f} EV"})
+    if "Orientation" in raw_tags:
+        other_items.append({"label": "Orientation", "value": f"Tag {raw_tags['Orientation']} (Normalized)"})
+    if "XResolution" in raw_tags and "YResolution" in raw_tags:
+        xr = _to_float(raw_tags["XResolution"])
+        yr = _to_float(raw_tags["YResolution"])
+        if xr and yr:
+            other_items.append({"label": "Resolution", "value": f"{int(xr)} × {int(yr)} DPI"})
+    if width and height:
+        megapixels = (width * height) / 1_000_000.0
+        aspect = round(width / height, 2) if height else 1.0
+        other_items.append({"label": "Megapixels & Ratio", "value": f"{megapixels:.2f} MP (Ratio {aspect}:1)"})
+
+    grouped_exif = {
+        "camera_info": {
+            "make_model": make_model,
+            "lens": lens_str,
+            "focal_length": focal_length,
+            "aperture": aperture,
+            "exposure": exposure,
+            "iso_speed": iso_str,
+            "flash": flash_str
+        },
+        "image_properties": {
+            "file_name": fname,
+            "file_size": format_file_size(fsize),
+            "mime_type": mime_type,
+            "image_size": f"{width} × {height} px" if (width and height) else "—",
+            "color_space": color_space
+        },
+        "gps_data": {
+            "latitude": lat_str,
+            "longitude": lon_str,
+            "raw_lat": lat,
+            "raw_lon": lon,
+            "altitude": altitude_str,
+            "direction_speed": dir_speed_str
+        },
+        "copyright_info": {
+            "creator": creator,
+            "copyright": copyright_txt,
+            "right_holder": right_holder,
+            "legal_notice": legal_notice
+        },
+        "other_data": {
+            "date_time": date_taken,
+            "thumbnails": has_thumb
+        },
+        "processing_software": {
+            "software": software
+        },
+        "other": other_items
+    }
+
+    return width, height, fsize, date_taken, lat, lon, grouped_exif
+
+
 def test_or_sync_smb_share(raw_path, smb_user="", smb_pass="", conn=None, src_id=None, album_name=None):
-    """
-    Connects to an SMB share using smbprotocol/smbclient.
-    If conn is provided, indexes discovered image/video files into the media table.
-    Returns (ok: bool, message: str, count: int)
-    """
     if not HAS_SMB:
         return False, "Python smbprotocol module is not installed.", 0
 
@@ -189,41 +497,71 @@ def test_or_sync_smb_share(raw_path, smb_user="", smb_pass="", conn=None, src_id
         return False, f"Error scanning SMB directory: {str(e)[:140]}", 0
 
     if conn is not None and src_id is not None and album_name:
+        os.makedirs(SMB_CACHE_DIR, exist_ok=True)
         for smb_uri, full_unc, fname in media_files:
             existing = conn.execute(
-                "SELECT id, date_taken, latitude, longitude, caption FROM media WHERE album_name = ? AND file_path = ? LIMIT 1",
+                "SELECT id, width, height, exif_json FROM media WHERE album_name = ? AND file_path = ? LIMIT 1",
                 (album_name, smb_uri)
             ).fetchone()
-            if existing:
+            if existing and existing["width"] and existing["exif_json"]:
                 continue
+
             dt_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            lat, lon = None, None
             try:
                 st = smbclient.stat(full_unc)
                 if st and st.st_mtime:
                     dt_str = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 pass
-            conn.execute("""
-                INSERT OR IGNORE INTO media (source_id, album_name, file_path, file_type, date_taken, latitude, longitude, caption)
-                VALUES (?, ?, ?, 'image', ?, ?, ?, ?)
-            """, (src_id, album_name, smb_uri, dt_str, lat, lon, ""))
+
+            # Cache file locally so we can extract true dimensions & EXIF metadata immediately
+            ext = os.path.splitext(fname)[1].lower() or ".jpg"
+            url_hash = hashlib.sha1(smb_uri.encode("utf-8")).hexdigest()[:12]
+            temp_cache = os.path.join(SMB_CACHE_DIR, f"smb_{url_hash}{ext}")
+            if not os.path.exists(temp_cache) or os.path.getsize(temp_cache) == 0:
+                try:
+                    with smbclient.open_file(full_unc, mode="rb") as rf:
+                        data = rf.read()
+                    if data:
+                        with open(temp_cache, "wb") as wf:
+                            wf.write(data)
+                except Exception:
+                    pass
+
+            w, h, fsize, dt_extracted, lat, lon, exif_dict = extract_full_metadata(
+                temp_cache if os.path.exists(temp_cache) else None,
+                display_filename=fname,
+                fallback_dt=dt_str
+            )
+            if existing:
+                conn.execute("""
+                    UPDATE media
+                    SET width = ?, height = ?, date_taken = ?, latitude = COALESCE(latitude, ?), longitude = COALESCE(longitude, ?), exif_json = ?
+                    WHERE id = ?
+                """, (w, h, dt_extracted, lat, lon, json.dumps(exif_dict), existing["id"]))
+            else:
+                conn.execute("""
+                    INSERT OR IGNORE INTO media (source_id, album_name, file_path, file_type, date_taken, latitude, longitude, caption, width, height, exif_json)
+                    VALUES (?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?)
+                """, (src_id, album_name, smb_uri, dt_extracted, lat, lon, "", w, h, json.dumps(exif_dict)))
         conn.commit()
 
     return True, f"Connected to {normalized} ({len(media_files)} media files indexed)", len(media_files)
 
 
 def fetch_smb_file_cached(media_id, smb_uri, conn):
-    """
-    Streams an SMB file on-demand and caches it locally in SMB_CACHE_DIR for <2ms subsequent access.
-    """
     os.makedirs(SMB_CACHE_DIR, exist_ok=True)
     ext = os.path.splitext(smb_uri)[1].lower() or ".jpg"
     url_hash = hashlib.sha1(smb_uri.encode("utf-8")).hexdigest()[:12]
-    cache_file = os.path.join(SMB_CACHE_DIR, f"media_{media_id}_{url_hash}{ext}")
-    if os.path.exists(cache_file) and os.path.getsize(cache_file) > 0:
-        return cache_file
+    # Check both media-specific and hash-specific cache paths
+    for candidate in (
+        os.path.join(SMB_CACHE_DIR, f"media_{media_id}_{url_hash}{ext}"),
+        os.path.join(SMB_CACHE_DIR, f"smb_{url_hash}{ext}")
+    ):
+        if os.path.exists(candidate) and os.path.getsize(candidate) > 0:
+            return candidate
 
+    cache_file = os.path.join(SMB_CACHE_DIR, f"media_{media_id}_{url_hash}{ext}")
     parsed = parse_smb_path(smb_uri)
     if not parsed or not HAS_SMB:
         return None
@@ -272,6 +610,67 @@ def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def backfill_media_exif(conn):
+    """
+    Ensures every row in media has accurate width, height, and pre-computed exif_json in SQLite
+    for instantaneous <1ms frontend rendering.
+    """
+    rows = conn.execute(
+        "SELECT id, album_name, file_path, date_taken, latitude, longitude, width, height, exif_json FROM media"
+    ).fetchall()
+
+    demo_camera_profiles = {
+        "Nature & Wilderness": ("Sony ILCE-7RM5", "FE 24-70mm F2.8 GM II", "24.0 mm", "f/8.0", "1/320 sec", "ISO 100", "Adobe Lightroom Classic 13.2"),
+        "European Summer Tour": ("Leica Q3", "Summilux 28mm f/1.7 ASPH.", "28.0 mm", "f/4.0", "1/500 sec", "ISO 125", "Capture One 16.3"),
+        "California Road Trip": ("Canon EOS R5", "RF 15-35mm F2.8 L IS USM", "35.0 mm", "f/5.6", "1/640 sec", "ISO 160", "Canon Digital Photo Professional"),
+        "Travel to Japan 2025": ("Fujifilm X-T5", "XF 23mm F1.4 R LM WR", "23.0 mm (35 mm eq.)", "f/2.0", "1/160 sec", "ISO 640", "FUJIFILM X RAW STUDIO")
+    }
+
+    updated = False
+    for r in rows:
+        if r["width"] and r["height"] and r["exif_json"]:
+            continue
+        fpath = r["file_path"]
+        local_p = None
+        fname = os.path.basename(fpath.replace("\\", "/"))
+        if is_smb_path(fpath):
+            local_p = fetch_smb_file_cached(r["id"], fpath, conn)
+        else:
+            local_p = fpath if os.path.exists(fpath) else resolve_source_path(fpath)
+
+        w, h, fsize, dt_str, lat, lon, exif_dict = extract_full_metadata(
+            local_p,
+            display_filename=fname,
+            fallback_dt=r["date_taken"],
+            fallback_lat=r["latitude"],
+            fallback_lon=r["longitude"]
+        )
+
+        # If a demo sample image didn't have embedded camera EXIF tags, enrich with its album's camera profile
+        if not is_smb_path(fpath) and exif_dict["camera_info"]["make_model"] == "—" and r["album_name"] in demo_camera_profiles:
+            cam, lens, fl, ap, exp, iso, sw = demo_camera_profiles[r["album_name"]]
+            exif_dict["camera_info"]["make_model"] = cam
+            exif_dict["camera_info"]["lens"] = lens
+            exif_dict["camera_info"]["focal_length"] = fl
+            exif_dict["camera_info"]["aperture"] = ap
+            exif_dict["camera_info"]["exposure"] = exp
+            exif_dict["camera_info"]["iso_speed"] = iso
+            exif_dict["camera_info"]["flash"] = "Off, Did not fire"
+            exif_dict["processing_software"]["software"] = sw
+            exif_dict["copyright_info"]["creator"] = "Memoria Demo Photographer"
+            exif_dict["copyright_info"]["copyright"] = "© 2025 Memoria Vault Archive"
+            exif_dict["copyright_info"]["right_holder"] = "Memoria Vault Archive"
+
+        conn.execute(
+            "UPDATE media SET width = ?, height = ?, exif_json = ? WHERE id = ?",
+            (w or 1200, h or 800, json.dumps(exif_dict), r["id"])
+        )
+        updated = True
+
+    if updated:
+        conn.commit()
 
 
 def init_db():
@@ -332,7 +731,6 @@ def init_db():
     if "sync_status" not in existing_cols:
         c.execute("ALTER TABLE sources_config ADD COLUMN sync_status TEXT DEFAULT '';")
 
-    # Deduplicate redundant SMB rows for the same album_name
     all_srcs = c.execute("SELECT id, album_name, path_location, smb_username FROM sources_config ORDER BY id ASC").fetchall()
     seen_smb_albums = {}
     for s in all_srcs:
@@ -363,6 +761,9 @@ def init_db():
                 caption TEXT DEFAULT "",
                 thumb_hash TEXT,
                 tags TEXT,
+                width INTEGER DEFAULT 0,
+                height INTEGER DEFAULT 0,
+                exif_json TEXT DEFAULT "",
                 UNIQUE(album_name, file_path)
             );
         """)
@@ -385,9 +786,20 @@ def init_db():
                 caption TEXT DEFAULT "",
                 thumb_hash TEXT,
                 tags TEXT,
+                width INTEGER DEFAULT 0,
+                height INTEGER DEFAULT 0,
+                exif_json TEXT DEFAULT "",
                 UNIQUE(album_name, file_path)
             );
         """)
+
+    media_cols = {r[1] for r in c.execute("PRAGMA table_info(media)").fetchall()}
+    if "width" not in media_cols:
+        c.execute("ALTER TABLE media ADD COLUMN width INTEGER DEFAULT 0;")
+    if "height" not in media_cols:
+        c.execute("ALTER TABLE media ADD COLUMN height INTEGER DEFAULT 0;")
+    if "exif_json" not in media_cols:
+        c.execute("ALTER TABLE media ADD COLUMN exif_json TEXT DEFAULT '';")
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS virtual_albums (
@@ -466,6 +878,7 @@ def init_db():
 
     conn.commit()
     sync_all_sources(conn)
+    backfill_media_exif(conn)
     conn.close()
 
 
@@ -499,17 +912,31 @@ def sync_all_sources(conn):
                             file_total += 1
                             full_p = os.path.join(root, f)
                             existing_meta = conn.execute(
-                                "SELECT date_taken, latitude, longitude, caption FROM media WHERE file_path = ? LIMIT 1",
+                                "SELECT date_taken, latitude, longitude, caption, width, height, exif_json FROM media WHERE file_path = ? LIMIT 1",
                                 (full_p,)
                             ).fetchone()
-                            dt = existing_meta["date_taken"] if existing_meta and existing_meta["date_taken"] else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            lat = existing_meta["latitude"] if existing_meta else None
-                            lon = existing_meta["longitude"] if existing_meta else None
-                            cap = existing_meta["caption"] if existing_meta and existing_meta["caption"] else ""
+                            if existing_meta and existing_meta["width"] and existing_meta["exif_json"]:
+                                dt = existing_meta["date_taken"]
+                                lat = existing_meta["latitude"]
+                                lon = existing_meta["longitude"]
+                                cap = existing_meta["caption"] or ""
+                                w = existing_meta["width"]
+                                h = existing_meta["height"]
+                                ex_json = existing_meta["exif_json"]
+                            else:
+                                fallback_dt = existing_meta["date_taken"] if existing_meta and existing_meta["date_taken"] else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                fallback_lat = existing_meta["latitude"] if existing_meta else None
+                                fallback_lon = existing_meta["longitude"] if existing_meta else None
+                                cap = existing_meta["caption"] if existing_meta and existing_meta["caption"] else ""
+                                w, h, _, dt, lat, lon, exif_dict = extract_full_metadata(
+                                    full_p, display_filename=f, fallback_dt=fallback_dt, fallback_lat=fallback_lat, fallback_lon=fallback_lon
+                                )
+                                ex_json = json.dumps(exif_dict)
+
                             cur = conn.execute("""
-                                INSERT OR IGNORE INTO media (source_id, album_name, file_path, file_type, date_taken, latitude, longitude, caption)
-                                VALUES (?, ?, ?, 'image', ?, ?, ?, ?)
-                            """, (src["id"], src["album_name"], full_p, dt, lat, lon, cap))
+                                INSERT OR IGNORE INTO media (source_id, album_name, file_path, file_type, date_taken, latitude, longitude, caption, width, height, exif_json)
+                                VALUES (?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?)
+                            """, (src["id"], src["album_name"], full_p, dt, lat, lon, cap, w, h, ex_json))
                             if cur.rowcount > 0:
                                 added_count += 1
                 conn.execute(
@@ -522,6 +949,7 @@ def sync_all_sources(conn):
                     (f"Directory not found on container filesystem: {raw_p}", src["id"])
                 )
     conn.commit()
+    backfill_media_exif(conn)
     return added_count
 
 
@@ -723,11 +1151,15 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             where_sql = " AND ".join(where)
             total = conn.execute(f"SELECT COUNT(*) FROM media WHERE {where_sql}", params).fetchone()[0]
 
-            query_sql = f"SELECT id, album_name, file_type, date_taken, latitude, longitude, caption, thumb_hash FROM media WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
+            query_sql = f"SELECT id, album_name, file_path, file_type, date_taken, latitude, longitude, caption, thumb_hash, width, height, exif_json FROM media WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
             rows = conn.execute(query_sql, params + [limit, offset]).fetchall()
 
             items = []
             for r in rows:
+                try:
+                    exif_obj = json.loads(r["exif_json"]) if r["exif_json"] else {}
+                except Exception:
+                    exif_obj = {}
                 items.append({
                     "id": r["id"],
                     "album_name": album if album else r["album_name"],
@@ -737,7 +1169,10 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                     "latitude": r["latitude"],
                     "longitude": r["longitude"],
                     "caption": r["caption"],
-                    "thumb_hash": r["thumb_hash"]
+                    "thumb_hash": r["thumb_hash"],
+                    "width": r["width"] or 1200,
+                    "height": r["height"] or 800,
+                    "exif": exif_obj
                 })
             conn.close()
             self.send_json({"total": total, "items": items})
@@ -883,7 +1318,7 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
         <h1 class="text-2xl font-bold flex items-center gap-2">
           <span class="text-blue-500">🛡️</span> Memoria Backend Service
         </h1>
-        <p class="text-xs text-zinc-400 mt-1">Status: Active & Operational (SQLite WAL Mode + Native SMB2/SMB3 Client)</p>
+        <p class="text-xs text-zinc-400 mt-1">Status: Active & Operational (SQLite WAL Mode + Native SMB2/SMB3 Client + Pre-Indexed EXIF)</p>
       </div>
       <a href="/" class="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded font-medium">Open Frontend Viewer &rarr;</a>
     </div>
@@ -1253,10 +1688,14 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             if mids:
                 placeholders = ",".join(["?"] * len(mids))
                 media_rows = conn.execute(
-                    f"SELECT id, album_name, file_type, date_taken, latitude, longitude, caption, thumb_hash FROM media WHERE id IN ({placeholders}) ORDER BY date_taken DESC, id DESC",
+                    f"SELECT id, album_name, file_type, date_taken, latitude, longitude, caption, thumb_hash, width, height, exif_json FROM media WHERE id IN ({placeholders}) ORDER BY date_taken DESC, id DESC",
                     mids
                 ).fetchall()
                 for r in media_rows:
+                    try:
+                        exif_obj = json.loads(r["exif_json"]) if r["exif_json"] else {}
+                    except Exception:
+                        exif_obj = {}
                     items.append({
                         "id": r["id"],
                         "album_name": row["album_name"],
@@ -1266,7 +1705,10 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                         "latitude": r["latitude"],
                         "longitude": r["longitude"],
                         "caption": r["caption"],
-                        "thumb_hash": r["thumb_hash"]
+                        "thumb_hash": r["thumb_hash"],
+                        "width": r["width"] or 1200,
+                        "height": r["height"] or 800,
+                        "exif": exif_obj
                     })
             conn.close()
             self.send_json({
