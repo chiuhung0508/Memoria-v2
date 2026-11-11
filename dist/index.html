@@ -576,7 +576,10 @@
           sourceConfigurations = data.map(s => ({
             id: s.id,
             name: s.album_name,
-            path: s.path_location
+            path: s.path_location,
+            smb_username: s.smb_username || '',
+            smb_password: s.smb_password || '',
+            sync_status: s.sync_status || ''
           }));
         }
       } catch (e) {}
@@ -646,7 +649,7 @@
         const data = await res.json();
         allAlbums = (Array.isArray(data) ? data : []).map(a => {
           if (typeof a === 'string') {
-            return { album_name: a, min_date: '', max_date: '', count: 0, is_virtual: false, source_id: null };
+            return { album_name: a, min_date: '', max_date: '', count: 0, is_virtual: false, is_smb: false, sync_status: '', source_id: null };
           }
           return {
             album_name: a.album_name,
@@ -654,6 +657,8 @@
             max_date: a.max_date || '',
             count: a.count || 0,
             is_virtual: Boolean(a.is_virtual),
+            is_smb: Boolean(a.is_smb),
+            sync_status: a.sync_status || '',
             source_id: a.source_id || null
           };
         });
@@ -748,10 +753,13 @@
         const isActive = currentAlbum === a.album_name ? 'bg-blue-600/20 text-blue-400 font-semibold' : 'hover:bg-zinc-800/40';
         const safeName = a.album_name.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
         const dateHint = a.min_date ? a.min_date.split(' ')[0] : '';
-        const icon = a.is_virtual ? '🗂️' : '📁';
-        const badge = a.is_virtual ? `<span class="text-[8px] px-1 py-0.2 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 shrink-0">Virtual</span>` : '';
+        const icon = a.is_virtual ? '🗂️' : (a.is_smb ? '🌐' : '📁');
+        const badge = a.is_virtual
+          ? `<span class="text-[8px] px-1 py-0.2 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 shrink-0">Virtual</span>`
+          : (a.is_smb ? `<span class="text-[8px] px-1 py-0.2 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 shrink-0">SMB</span>` : '');
+        const tip = (a.sync_status || a.album_name).replace(/"/g, '&quot;');
         return `
-          <div class="group flex items-center justify-between rounded-lg transition ${isActive}">
+          <div class="group flex items-center justify-between rounded-lg transition ${isActive}" title="${tip}">
             <button onclick="selectAlbum('${safeName}')" class="flex-1 text-left px-2 py-1.5 flex items-center justify-between gap-1.5 min-w-0">
               <span class="truncate flex items-center gap-1"><span>${icon}</span> <span class="truncate">${a.album_name}</span> ${badge}</span>
               <span class="text-[9px] text-zinc-500 font-mono shrink-0">${dateHint || (a.count + ' items')}</span>
@@ -1658,20 +1666,94 @@
     function renderSettings() {
       const c = document.getElementById('source-paths-list');
       if (!c) return;
-      c.innerHTML = sourceConfigurations.map((s, idx) => `
-        <div class="flex items-center gap-2">
-          <input type="text" placeholder="Album / Folder Name" value="${(s.name || '').replace(/"/g, '&quot;')}" oninput="sourceConfigurations[${idx}].name = this.value" style="background-color: var(--bg-input); border-color: var(--border-color);" class="border rounded-lg px-3 py-1.5 text-xs flex-1 focus:outline-none focus:border-blue-500" />
-          <input type="text" placeholder="/media_sources/folder" value="${(s.path || '').replace(/"/g, '&quot;')}" oninput="sourceConfigurations[${idx}].path = this.value" style="background-color: var(--bg-input); border-color: var(--border-color);" class="border rounded-lg px-3 py-1.5 text-xs flex-1 font-mono focus:outline-none focus:border-blue-500" />
-          <button onclick="removeSourceRow(${idx})" title="Remove Album / Source Directory" class="px-2.5 py-1.5 rounded-lg border border-rose-500/30 bg-rose-500/10 hover:bg-rose-600 text-rose-400 hover:text-white text-xs transition shrink-0">
-            🗑️
-          </button>
-        </div>
-      `).join('');
+      c.innerHTML = sourceConfigurations.map((s, idx) => {
+        const p = (s.path || '').trim();
+        const isSmb = p.startsWith('//') || p.startsWith('\\\\') || p.toLowerCase().startsWith('smb://');
+        const st = s.sync_status || '';
+        const isErr = st.toLowerCase().includes('required') || st.toLowerCase().includes('failed') || st.toLowerCase().includes('not found') || st.toLowerCase().includes('error');
+        const stColor = !st ? 'text-zinc-500' : (isErr ? 'text-amber-400' : 'text-emerald-400');
+
+        return `
+          <div style="background-color: var(--bg-input); border-color: var(--border-color);" class="border rounded-xl p-3 space-y-2">
+            <div class="flex items-center gap-2">
+              <input type="text" placeholder="Album / Folder Name" value="${(s.name || '').replace(/"/g, '&quot;')}"
+                     oninput="sourceConfigurations[${idx}].name = this.value"
+                     style="background-color: var(--bg-panel); border-color: var(--border-color);"
+                     class="border rounded-lg px-3 py-1.5 text-xs w-48 focus:outline-none focus:border-blue-500" />
+              <input type="text" placeholder="//NAS_Synology/Share/Folder or /media_sources/folder" value="${(s.path || '').replace(/"/g, '&quot;')}"
+                     oninput="sourceConfigurations[${idx}].path = this.value"
+                     style="background-color: var(--bg-panel); border-color: var(--border-color);"
+                     class="border rounded-lg px-3 py-1.5 text-xs flex-1 font-mono focus:outline-none focus:border-blue-500" />
+              <button onclick="testSourceConnection(${idx})" title="Test Path / SMB Share Connectivity"
+                      class="px-2.5 py-1.5 rounded-lg border border-blue-500/30 bg-blue-500/10 hover:bg-blue-600 text-blue-400 hover:text-white text-xs font-medium transition shrink-0">
+                🔌 Test
+              </button>
+              <button onclick="removeSourceRow(${idx})" title="Remove Album / Source Directory"
+                      class="px-2.5 py-1.5 rounded-lg border border-rose-500/30 bg-rose-500/10 hover:bg-rose-600 text-rose-400 hover:text-white text-xs transition shrink-0">
+                🗑️
+              </button>
+            </div>
+            <div class="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+              <div class="flex items-center gap-2 flex-1 min-w-[260px]">
+                <span class="text-[10px] text-zinc-400 font-semibold uppercase shrink-0">${isSmb ? '🌐 SMB Credentials:' : '🔐 SMB Auth (optional):'}</span>
+                <input type="text" placeholder="SMB Username (blank = Guest)" value="${(s.smb_username || '').replace(/"/g, '&quot;')}"
+                       oninput="sourceConfigurations[${idx}].smb_username = this.value"
+                       style="background-color: var(--bg-panel); border-color: var(--border-color);"
+                       class="border rounded-lg px-2.5 py-1 text-[11px] w-44 focus:outline-none focus:border-blue-500" />
+                <input type="password" placeholder="SMB Password" value="${(s.smb_password || '').replace(/"/g, '&quot;')}"
+                       oninput="sourceConfigurations[${idx}].smb_password = this.value"
+                       style="background-color: var(--bg-panel); border-color: var(--border-color);"
+                       class="border rounded-lg px-2.5 py-1 text-[11px] w-44 focus:outline-none focus:border-blue-500" />
+              </div>
+              <span id="source-row-status-${idx}" class="text-[11px] font-medium ${stColor}">${st ? (isErr ? '⚠️ ' : '✓ ') + st : ''}</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function testSourceConnection(idx) {
+      const s = sourceConfigurations[idx];
+      if (!s) return;
+      const stEl = document.getElementById(`source-row-status-${idx}`);
+      if (stEl) {
+        stEl.className = 'text-[11px] font-medium text-blue-400';
+        stEl.textContent = '⏳ Testing connection...';
+      }
+      try {
+        const res = await fetch('/api/smb/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            path_location: s.path,
+            smb_username: s.smb_username || '',
+            smb_password: s.smb_password || ''
+          })
+        });
+        const data = await res.json();
+        s.sync_status = data.message || '';
+        if (stEl) {
+          stEl.className = `text-[11px] font-medium ${data.ok ? 'text-emerald-400' : 'text-amber-400'}`;
+          stEl.textContent = (data.ok ? '✓ ' : '⚠️ ') + (data.message || '');
+        }
+      } catch (e) {
+        if (stEl) {
+          stEl.className = 'text-[11px] font-medium text-rose-400';
+          stEl.textContent = '⚠️ Connection test failed.';
+        }
+      }
     }
 
     function addNewSourceRow() {
       const nextNum = sourceConfigurations.length + 1;
-      sourceConfigurations.push({ id: null, name: `New Album ${nextNum}`, path: `/media_sources/nature` });
+      sourceConfigurations.push({
+        id: null,
+        name: `New Album ${nextNum}`,
+        path: `//NAS_Synology/NAS_D02/Family-Memoria-Media`,
+        smb_username: '',
+        smb_password: '',
+        sync_status: ''
+      });
       renderSettings();
     }
 
@@ -1705,6 +1787,10 @@
 
     async function saveSourcesConfig() {
       const msg = document.getElementById('sources-status-msg');
+      if (msg) {
+        msg.className = 'text-xs text-blue-400 font-medium';
+        msg.textContent = '⏳ Saving & connecting sources...';
+      }
       try {
         const res = await fetch('/api/config', {
           method: 'POST',
@@ -1712,7 +1798,9 @@
           body: JSON.stringify(sourceConfigurations.map(s => ({
             id: s.id || null,
             album_name: s.name,
-            path_location: s.path
+            path_location: s.path,
+            smb_username: s.smb_username || '',
+            smb_password: s.smb_password || ''
           })))
         });
         if (res.ok) {
@@ -1737,7 +1825,7 @@
       const syncMsg = document.getElementById('sync-status-msg');
       if (syncMsg) {
         syncMsg.className = 'text-xs text-blue-400 font-medium';
-        syncMsg.textContent = '⏳ Syncing sources & reloading index...';
+        syncMsg.textContent = '⏳ Syncing local & SMB sources and reloading index...';
       }
       try {
         const res = await fetch('/api/sync', {
@@ -1747,7 +1835,9 @@
             sources: sourceConfigurations.map(s => ({
               id: s.id || null,
               album_name: s.name,
-              path_location: s.path
+              path_location: s.path,
+              smb_username: s.smb_username || '',
+              smb_password: s.smb_password || ''
             }))
           })
         });
