@@ -1,10 +1,10 @@
 FROM python:3.12-slim-bookworm
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg sqlite3 && pip install --no-cache-dir smbprotocol pillow && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg sqlite3 && pip install --no-cache-dir smbprotocol pillow cryptography && rm -rf /var/lib/apt/lists/*
 COPY server.py /app/server.py
 COPY dist /app/dist
 COPY media_sources /app/media_sources
-RUN mkdir -p /data
+RUN mkdir -p /data /data/thumb_cache
 EXPOSE 8080
 ENV HOST="0.0.0.0"
 ENV PORT="8080"

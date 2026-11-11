@@ -3,14 +3,22 @@ import http.server
 import socketserver
 import socket
 import subprocess
+import threading
 import json
 import sqlite3
 import os
 import io
+import base64
 import hashlib
 import secrets
 import urllib.parse
 from datetime import datetime
+
+try:
+    from cryptography.fernet import Fernet
+    HAS_CRYPTO = True
+except Exception:
+    HAS_CRYPTO = False
 
 try:
     import smbclient
@@ -29,9 +37,95 @@ HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", 8080))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "data", "memoria.db"))
-SMB_CACHE_DIR = os.path.join(os.path.dirname(DB_PATH), "smb_cache")
+DATA_DIR = os.path.dirname(DB_PATH)
+SMB_CACHE_DIR = os.path.join(DATA_DIR, "smb_cache")
+THUMB_CACHE_DIR = os.path.join(DATA_DIR, "thumb_cache")
+SECRET_KEY_PATH = os.path.join(DATA_DIR, ".memoria_secret.key")
 DIST_DIR = os.path.join(BASE_DIR, "dist")
 SOURCES_DIR = os.path.join(BASE_DIR, "media_sources")
+
+SMB_LOCK = threading.Lock()
+SYNC_LOCK = threading.Lock()
+DB_WRITE_LOCK = threading.Lock()
+ACTIVE_SESSIONS = {}
+
+
+def load_or_create_secret_key():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    if os.path.exists(SECRET_KEY_PATH):
+        try:
+            with open(SECRET_KEY_PATH, "rb") as f:
+                key = f.read().strip()
+                if len(key) >= 32:
+                    return key
+        except Exception:
+            pass
+    key = Fernet.generate_key() if HAS_CRYPTO else base64.urlsafe_b64encode(secrets.token_bytes(32))
+    try:
+        with open(SECRET_KEY_PATH, "wb") as f:
+            f.write(key)
+        os.chmod(SECRET_KEY_PATH, 0o600)
+    except Exception:
+        pass
+    return key
+
+
+SECRET_KEY = load_or_create_secret_key()
+FERNET = Fernet(SECRET_KEY) if HAS_CRYPTO else None
+TRANSPORT_KEY = hashlib.sha256(SECRET_KEY).hexdigest()[:32]
+
+
+def encrypt_secret(plaintext):
+    if not plaintext:
+        return ""
+    val = str(plaintext)
+    if val.startswith("enc:"):
+        return val
+    if val.startswith("tr:"):
+        val = decode_transport_secret(val)
+    if not val:
+        return ""
+    if FERNET:
+        token = FERNET.encrypt(val.encode("utf-8")).decode("utf-8")
+        return f"enc:{token}"
+    b64 = base64.urlsafe_b64encode(val.encode("utf-8")).decode("utf-8")
+    return f"enc:{b64}"
+
+
+def decrypt_secret(stored_val):
+    if not stored_val:
+        return ""
+    val = str(stored_val)
+    if val.startswith("tr:"):
+        return decode_transport_secret(val)
+    if not val.startswith("enc:"):
+        return val
+    payload = val[4:]
+    if FERNET:
+        try:
+            return FERNET.decrypt(payload.encode("utf-8")).decode("utf-8")
+        except Exception:
+            pass
+    try:
+        return base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8")
+    except Exception:
+        return ""
+
+
+def decode_transport_secret(tr_val):
+    """
+    Decodes a transport-encrypted credential ('tr:<base64>') sent from the browser
+    using the backend's TRANSPORT_KEY so plaintext credentials never cross the wire.
+    """
+    if not tr_val or not str(tr_val).startswith("tr:"):
+        return str(tr_val or "")
+    try:
+        raw = base64.b64decode(str(tr_val)[3:])
+        key_bytes = TRANSPORT_KEY.encode("utf-8")
+        out = bytes(b ^ key_bytes[i % len(key_bytes)] for i, b in enumerate(raw))
+        return out.decode("utf-8")
+    except Exception:
+        return ""
 
 
 def get_local_network_urls():
@@ -42,24 +136,6 @@ def get_local_network_urls():
             u = u.strip()
             if u and u not in urls:
                 urls.append(u)
-    if os.environ.get("AUTO_DETECT_LAN", "0") == "1":
-        try:
-            hostname = socket.gethostname()
-            if hostname:
-                url = f"http://{hostname}.local:{PORT}"
-                if url not in urls:
-                    urls.append(url)
-        except Exception:
-            pass
-        try:
-            out = subprocess.check_output(["hostname", "-I"], text=True).strip()
-            for ip in out.split():
-                if ":" not in ip:
-                    url = f"http://{ip}:{PORT}"
-                    if url not in urls:
-                        urls.append(url)
-        except Exception:
-            pass
     return urls
 
 
@@ -94,14 +170,22 @@ def parse_smb_path(raw_path):
     return server, share, subpath, normalized
 
 
+_SMB_HOST_CACHE = {}
+
+
 def resolve_smb_host(server):
+    if server in _SMB_HOST_CACHE:
+        return _SMB_HOST_CACHE[server]
     for candidate in (server, f"{server}.home", f"{server}.local"):
         try:
             info = socket.getaddrinfo(candidate, 445, socket.AF_INET, socket.SOCK_STREAM)
             if info:
-                return info[0][4][0]
+                ip = info[0][4][0]
+                _SMB_HOST_CACHE[server] = ip
+                return ip
         except Exception:
             pass
+    _SMB_HOST_CACHE[server] = server
     return server
 
 
@@ -195,26 +279,21 @@ EXPOSURE_PROG_MAP = {
 }
 
 
-def extract_full_metadata(local_file_path, display_filename=None, fallback_dt=None, fallback_lat=None, fallback_lon=None):
-    """
-    Extracts image dimensions (width, height) and builds the 7-group structured EXIF dictionary
-    for persistence in the SQLite media table.
-    """
+def extract_full_metadata(local_file_path, display_filename=None, fallback_dt=None, fallback_lat=None, fallback_lon=None, fallback_size=0):
     fname = display_filename or os.path.basename(local_file_path or "")
     ext = os.path.splitext(fname)[1].lower()
     mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
     mime_type = mime_map.get(ext, "image/jpeg")
 
-    fsize = 0
+    fsize = fallback_size or 0
     if local_file_path and os.path.exists(local_file_path):
         try:
             fsize = os.path.getsize(local_file_path)
         except Exception:
-            fsize = 0
+            pass
 
     width, height = 0, 0
     color_space = "sRGB"
-    has_thumb = "No embedded thumbnail"
     raw_tags = {}
     gps_tags = {}
 
@@ -223,7 +302,6 @@ def extract_full_metadata(local_file_path, display_filename=None, fallback_dt=No
             with Image.open(local_file_path) as img:
                 width, height = img.size
                 mode = img.mode or "RGB"
-                # Collect EXIF tags
                 try:
                     exif_obj = img.getexif()
                     if exif_obj:
@@ -246,7 +324,6 @@ def extract_full_metadata(local_file_path, display_filename=None, fallback_dt=No
                 except Exception:
                     pass
 
-                # Fallback to _getexif() if needed
                 if not raw_tags and hasattr(img, "_getexif"):
                     try:
                         legacy = img._getexif() or {}
@@ -260,7 +337,6 @@ def extract_full_metadata(local_file_path, display_filename=None, fallback_dt=No
                     except Exception:
                         pass
 
-                # Check Orientation to transpose width/height if rotated 90/270 deg
                 orient = raw_tags.get("Orientation")
                 if orient in (5, 6, 7, 8):
                     width, height = height, width
@@ -275,7 +351,6 @@ def extract_full_metadata(local_file_path, display_filename=None, fallback_dt=No
         except Exception:
             pass
 
-    # 1. Camera info
     make = _clean_str(raw_tags.get("Make"))
     model = _clean_str(raw_tags.get("Model"))
     if make and model:
@@ -300,7 +375,7 @@ def extract_full_metadata(local_file_path, display_filename=None, fallback_dt=No
     exp_val = raw_tags.get("ExposureTime")
     exp_float = _to_float(exp_val)
     if exp_float:
-        if exp_float < 1.0 and exp_float > 0:
+        if 0 < exp_float < 1.0:
             denom = int(round(1.0 / exp_float))
             exposure = f"1/{denom} sec"
         else:
@@ -316,7 +391,6 @@ def extract_full_metadata(local_file_path, display_filename=None, fallback_dt=No
     flash_val = raw_tags.get("Flash")
     flash_str = FLASH_MAP.get(int(flash_val), f"Mode {flash_val}") if isinstance(flash_val, int) else "—"
 
-    # 3. GPS data
     lat = fallback_lat
     lon = fallback_lon
     if "GPSLatitude" in gps_tags and "GPSLatitudeRef" in gps_tags and "GPSLongitude" in gps_tags and "GPSLongitudeRef" in gps_tags:
@@ -352,23 +426,19 @@ def extract_full_metadata(local_file_path, display_filename=None, fallback_dt=No
     lat_str = f"{abs(lat):.5f}° {'N' if lat >= 0 else 'S'} ({lat:.5f})" if lat is not None else "—"
     lon_str = f"{abs(lon):.5f}° {'E' if lon >= 0 else 'W'} ({lon:.5f})" if lon is not None else "—"
 
-    # 4. Copyright info
     creator = _clean_str(raw_tags.get("Artist") or raw_tags.get("XPAuthor") or raw_tags.get("CameraOwnerName")) or "—"
     copyright_txt = _clean_str(raw_tags.get("Copyright")) or "—"
     right_holder = copyright_txt if copyright_txt != "—" else creator
     legal_notice = _clean_str(raw_tags.get("ImageDescription") or raw_tags.get("UserComment")) or "—"
 
-    # 5. Other data
     dt_raw = _clean_str(raw_tags.get("DateTimeOriginal") or raw_tags.get("DateTimeDigitized") or raw_tags.get("DateTime"))
     if dt_raw and len(dt_raw) >= 10 and dt_raw[4] == ":":
         dt_raw = dt_raw.replace(":", "-", 2)
     date_taken = dt_raw or fallback_dt or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    has_thumb = "Embedded EXIF Thumbnail" if ("JPEGInterchangeFormat" in raw_tags or "ThumbnailImage" in raw_tags) else f"Standard Stream ({width}×{height})"
+    has_thumb = "Embedded EXIF Thumbnail" if ("JPEGInterchangeFormat" in raw_tags or "ThumbnailImage" in raw_tags) else (f"Cached 360px + Stream ({width}×{height})" if width and height else "Cached Low-Res Thumbnail")
 
-    # 6. Processing software
     software = _clean_str(raw_tags.get("Software") or raw_tags.get("ProcessingSoftware")) or "—"
 
-    # 7. Other (if any)
     other_items = []
     if "WhiteBalance" in raw_tags:
         wb = raw_tags["WhiteBalance"]
@@ -409,7 +479,7 @@ def extract_full_metadata(local_file_path, display_filename=None, fallback_dt=No
             "file_name": fname,
             "file_size": format_file_size(fsize),
             "mime_type": mime_type,
-            "image_size": f"{width} × {height} px" if (width and height) else "—",
+            "image_size": f"{width} × {height} px" if (width and height) else "Loaded on view",
             "color_space": color_space
         },
         "gps_data": {
@@ -439,6 +509,33 @@ def extract_full_metadata(local_file_path, display_filename=None, fallback_dt=No
     return width, height, fsize, date_taken, lat, lon, grouped_exif
 
 
+def _scan_smb_recursive(unc_dir, server, results_list):
+    """
+    Fast SMB2 directory traversal using smbclient.scandir() which reads st_mtime and st_size
+    directly from the SMB2 QUERY_DIRECTORY response without per-file stat() or open_file() calls.
+    """
+    try:
+        for entry in smbclient.scandir(unc_dir):
+            name = entry.name
+            if name in (".", "..") or name.startswith("._") or name == "@eaDir":
+                continue
+            full_unc = unc_dir.rstrip("\\") + "\\" + name
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    _scan_smb_recursive(full_unc, server, results_list)
+                elif name.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                    st = entry.stat(follow_symlinks=False)
+                    mtime = st.st_mtime if st and st.st_mtime else None
+                    fsize = st.st_size if st and st.st_size else 0
+                    rel_from_host = full_unc.lstrip("\\").split("\\", 1)[1].replace("\\", "/")
+                    canonical_smb_uri = f"smb://{server}/{rel_from_host}"
+                    results_list.append((canonical_smb_uri, full_unc, name, mtime, fsize))
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
 def test_or_sync_smb_share(raw_path, smb_user="", smb_pass="", conn=None, src_id=None, album_name=None):
     if not HAS_SMB:
         return False, "Python smbprotocol module is not installed.", 0
@@ -451,124 +548,71 @@ def test_or_sync_smb_share(raw_path, smb_user="", smb_pass="", conn=None, src_id
     target_host = resolve_smb_host(server)
     unc_base = f"\\\\{target_host}\\{share}" + (f"\\{subpath.replace('/', '\\')}" if subpath else "")
 
-    user = (smb_user or "").strip()
-    pw = smb_pass or ""
+    user = decrypt_secret(smb_user).strip()
+    pw = decrypt_secret(smb_pass)
 
-    try:
-        smbclient.reset_connection_cache()
-        if user:
-            smbclient.register_session(target_host, username=user, password=pw, connection_timeout=6)
-        else:
-            smbclient.register_session(target_host, username="guest", password="", connection_timeout=6)
+    with SMB_LOCK:
+        try:
+            if user:
+                smbclient.register_session(target_host, username=user, password=pw, connection_timeout=6)
+            else:
+                smbclient.register_session(target_host, username="guest", password="", connection_timeout=6)
 
-        list(smbclient.scandir(unc_base))
-    except Exception as e:
-        err_str = str(e)
-        if "0xc0000072" in err_str or "ACCOUNT_DISABLED" in err_str or not user:
-            return (
-                False,
-                f"SMB Auth Required on {server} ({target_host}): Guest access is disabled on this NAS. Enter your NAS SMB Username & Password in Settings.",
-                0
-            )
-        elif "0xc000006d" in err_str or "LOGON_FAILURE" in err_str or "SMBAuthenticationError" in type(e).__name__:
-            return (
-                False,
-                f"SMB Login Failed on {server} ({target_host}) for user '{user}': Invalid username or password.",
-                0
-            )
-        elif "0xc0000034" in err_str or "0xc000003a" in err_str or "OBJECT_NAME_NOT_FOUND" in err_str or "OBJECT_PATH_NOT_FOUND" in err_str:
-            return (
-                False,
-                f"Connected to {server}, but folder '{subpath or share}' was not found on share '{share}'.",
-                0
-            )
-        return False, f"SMB Error ({server}): {err_str[:160]}", 0
+            list(smbclient.scandir(unc_base))
+        except Exception as e:
+            err_str = str(e)
+            if "0xc0000072" in err_str or "ACCOUNT_DISABLED" in err_str or not user:
+                return (
+                    False,
+                    f"SMB Auth Required on {server} ({target_host}): Guest access is disabled on this NAS. Enter your NAS SMB Username & Password in Settings.",
+                    0
+                )
+            elif "0xc000006d" in err_str or "LOGON_FAILURE" in err_str or "SMBAuthenticationError" in type(e).__name__:
+                return (
+                    False,
+                    f"SMB Login Failed on {server} ({target_host}): Invalid SMB username or password.",
+                    0
+                )
+            elif "0xc0000034" in err_str or "0xc000003a" in err_str or "OBJECT_NAME_NOT_FOUND" in err_str or "OBJECT_PATH_NOT_FOUND" in err_str:
+                return (
+                    False,
+                    f"Connected to {server}, but folder '{subpath or share}' was not found on share '{share}'.",
+                    0
+                )
+            return False, f"SMB Error ({server}): {err_str[:160]}", 0
 
-    media_files = []
-    try:
-        for root, _, files in smbclient.walk(unc_base):
-            for fname in sorted(files):
-                if fname.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-                    full_unc = root.rstrip("\\") + "\\" + fname
-                    rel_from_host = full_unc.lstrip("\\").split("\\", 1)[1].replace("\\", "/")
-                    canonical_smb_uri = f"smb://{server}/{rel_from_host}"
-                    media_files.append((canonical_smb_uri, full_unc, fname))
-    except Exception as e:
-        return False, f"Error scanning SMB directory: {str(e)[:140]}", 0
+        media_files = []
+        _scan_smb_recursive(unc_base, server, media_files)
 
     if conn is not None and src_id is not None and album_name:
-        os.makedirs(SMB_CACHE_DIR, exist_ok=True)
-        for smb_uri, full_unc, fname in media_files:
-            existing = conn.execute(
-                "SELECT id, width, height, exif_json FROM media WHERE album_name = ? AND file_path = ? LIMIT 1",
-                (album_name, smb_uri)
-            ).fetchone()
-            if existing and existing["width"] and existing["exif_json"]:
+        existing_paths = {
+            r["file_path"] for r in conn.execute(
+                "SELECT file_path FROM media WHERE album_name = ?", (album_name,)
+            ).fetchall()
+        }
+        batch_rows = []
+        for smb_uri, full_unc, fname, mtime, fsize in media_files:
+            if smb_uri in existing_paths:
                 continue
-
-            dt_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            try:
-                st = smbclient.stat(full_unc)
-                if st and st.st_mtime:
-                    dt_str = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-            except Exception:
-                pass
-
-            # Cache file locally so we can extract true dimensions & EXIF metadata immediately
-            ext = os.path.splitext(fname)[1].lower() or ".jpg"
-            url_hash = hashlib.sha1(smb_uri.encode("utf-8")).hexdigest()[:12]
-            temp_cache = os.path.join(SMB_CACHE_DIR, f"smb_{url_hash}{ext}")
-            if not os.path.exists(temp_cache) or os.path.getsize(temp_cache) == 0:
-                try:
-                    with smbclient.open_file(full_unc, mode="rb") as rf:
-                        data = rf.read()
-                    if data:
-                        with open(temp_cache, "wb") as wf:
-                            wf.write(data)
-                except Exception:
-                    pass
-
-            w, h, fsize, dt_extracted, lat, lon, exif_dict = extract_full_metadata(
-                temp_cache if os.path.exists(temp_cache) else None,
-                display_filename=fname,
-                fallback_dt=dt_str
+            dt_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S") if mtime else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # Create initial lightweight EXIF summary from SMB directory entry metadata (zero file download during sync!)
+            _, _, _, _, _, _, init_exif = extract_full_metadata(
+                None, display_filename=fname, fallback_dt=dt_str, fallback_size=fsize
             )
-            if existing:
-                conn.execute("""
-                    UPDATE media
-                    SET width = ?, height = ?, date_taken = ?, latitude = COALESCE(latitude, ?), longitude = COALESCE(longitude, ?), exif_json = ?
-                    WHERE id = ?
-                """, (w, h, dt_extracted, lat, lon, json.dumps(exif_dict), existing["id"]))
-            else:
-                conn.execute("""
+            batch_rows.append((src_id, album_name, smb_uri, "image", dt_str, None, None, "", 0, 0, json.dumps(init_exif)))
+
+        if batch_rows:
+            with DB_WRITE_LOCK:
+                conn.executemany("""
                     INSERT OR IGNORE INTO media (source_id, album_name, file_path, file_type, date_taken, latitude, longitude, caption, width, height, exif_json)
-                    VALUES (?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?)
-                """, (src_id, album_name, smb_uri, dt_extracted, lat, lon, "", w, h, json.dumps(exif_dict)))
-        conn.commit()
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, batch_rows)
+                conn.commit()
 
     return True, f"Connected to {normalized} ({len(media_files)} media files indexed)", len(media_files)
 
 
-def fetch_smb_file_cached(media_id, smb_uri, conn):
-    os.makedirs(SMB_CACHE_DIR, exist_ok=True)
-    ext = os.path.splitext(smb_uri)[1].lower() or ".jpg"
-    url_hash = hashlib.sha1(smb_uri.encode("utf-8")).hexdigest()[:12]
-    # Check both media-specific and hash-specific cache paths
-    for candidate in (
-        os.path.join(SMB_CACHE_DIR, f"media_{media_id}_{url_hash}{ext}"),
-        os.path.join(SMB_CACHE_DIR, f"smb_{url_hash}{ext}")
-    ):
-        if os.path.exists(candidate) and os.path.getsize(candidate) > 0:
-            return candidate
-
-    cache_file = os.path.join(SMB_CACHE_DIR, f"media_{media_id}_{url_hash}{ext}")
-    parsed = parse_smb_path(smb_uri)
-    if not parsed or not HAS_SMB:
-        return None
-    server, share, subpath, _ = parsed
-    target_host = resolve_smb_host(server)
-    unc_file = f"\\\\{target_host}\\{share}\\{subpath.replace('/', '\\')}"
-
+def _get_smb_credentials_for_media(media_id, server, conn):
     src_row = conn.execute("""
         SELECT s.smb_username, s.smb_password
         FROM media m
@@ -578,47 +622,204 @@ def fetch_smb_file_cached(media_id, smb_uri, conn):
     user = ""
     pw = ""
     if src_row and src_row["smb_username"]:
-        user = src_row["smb_username"]
-        pw = src_row["smb_password"] or ""
+        user = decrypt_secret(src_row["smb_username"])
+        pw = decrypt_secret(src_row["smb_password"] or "")
     else:
         any_src = conn.execute(
             "SELECT smb_username, smb_password FROM sources_config WHERE path_location LIKE ? AND smb_username != '' LIMIT 1",
             (f"%{server}%",)
         ).fetchone()
         if any_src:
-            user = any_src["smb_username"]
-            pw = any_src["smb_password"] or ""
+            user = decrypt_secret(any_src["smb_username"])
+            pw = decrypt_secret(any_src["smb_password"] or "")
+    return user, pw
+
+
+_SMB_AUTH_FAIL_CACHE = {}
+
+
+def fetch_smb_bytes(media_id, smb_uri, conn):
+    parsed = parse_smb_path(smb_uri)
+    if not parsed or not HAS_SMB:
+        return None
+    server, share, subpath, _ = parsed
+    target_host = resolve_smb_host(server)
+    unc_file = f"\\\\{target_host}\\{share}\\{subpath.replace('/', '\\')}"
+    user, pw = _get_smb_credentials_for_media(media_id, server, conn)
+
+    cache_key = (target_host, user, pw)
+    now_ts = time.time()
+    fail_ts = _SMB_AUTH_FAIL_CACHE.get(cache_key)
+    if fail_ts and (now_ts - fail_ts) < 15.0:
+        return None
+
+    with SMB_LOCK:
+        try:
+            if user:
+                smbclient.register_session(target_host, username=user, password=pw, connection_timeout=6)
+            else:
+                smbclient.register_session(target_host, username="guest", password="", connection_timeout=6)
+            with smbclient.open_file(unc_file, mode="rb") as rf:
+                return rf.read()
+        except Exception:
+            _SMB_AUTH_FAIL_CACHE[cache_key] = time.time()
+            return None
+
+
+def get_or_create_thumbnail(media_id, row, conn):
+    """
+    Returns path to a fast low-resolution thumbnail (~15-25 KB, 360x360 max) in THUMB_CACHE_DIR.
+    Also lazily updates true width, height, and full EXIF in SQLite on first access!
+    """
+    os.makedirs(THUMB_CACHE_DIR, exist_ok=True)
+    thumb_path = os.path.join(THUMB_CACHE_DIR, f"thumb_{media_id}.jpg")
+    if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 0:
+        return thumb_path
+
+    fpath = row["file_path"]
+    fname = os.path.basename(fpath.replace("\\", "/"))
+    raw_bytes = None
+    local_source = None
+
+    if is_smb_path(fpath):
+        # Check if full file is already in SMB_CACHE_DIR
+        ext = os.path.splitext(fpath)[1].lower() or ".jpg"
+        url_hash = hashlib.sha1(fpath.encode("utf-8")).hexdigest()[:12]
+        for cand in (
+            os.path.join(SMB_CACHE_DIR, f"media_{media_id}_{url_hash}{ext}"),
+            os.path.join(SMB_CACHE_DIR, f"smb_{url_hash}{ext}")
+        ):
+            if os.path.exists(cand) and os.path.getsize(cand) > 0:
+                local_source = cand
+                break
+        if not local_source:
+            raw_bytes = fetch_smb_bytes(media_id, fpath, conn)
+    else:
+        resolved = fpath if os.path.exists(fpath) else resolve_source_path(fpath)
+        if resolved and os.path.exists(resolved):
+            local_source = resolved
+
+    if not local_source and not raw_bytes:
+        return None
+
+    if not HAS_PIL:
+        if local_source:
+            return local_source
+        with open(thumb_path, "wb") as wf:
+            wf.write(raw_bytes)
+        return thumb_path
 
     try:
-        if user:
-            smbclient.register_session(target_host, username=user, password=pw, connection_timeout=6)
-        else:
-            smbclient.register_session(target_host, username="guest", password="", connection_timeout=6)
+        img_stream = io.BytesIO(raw_bytes) if raw_bytes else open(local_source, "rb")
+        with img_stream:
+            with Image.open(img_stream) as img:
+                # Extract metadata if width/height not yet populated in SQLite
+                if not row["width"] or not row["height"]:
+                    temp_meta_path = local_source
+                    if not temp_meta_path and raw_bytes:
+                        os.makedirs(SMB_CACHE_DIR, exist_ok=True)
+                        temp_meta_path = os.path.join(SMB_CACHE_DIR, f"tmp_{media_id}.jpg")
+                        with open(temp_meta_path, "wb") as tf:
+                            tf.write(raw_bytes)
+                    w, h, fsize, dt_str, lat, lon, exif_dict = extract_full_metadata(
+                        temp_meta_path,
+                        display_filename=fname,
+                        fallback_dt=row["date_taken"],
+                        fallback_lat=row["latitude"],
+                        fallback_lon=row["longitude"],
+                        fallback_size=len(raw_bytes) if raw_bytes else 0
+                    )
+                    if raw_bytes and temp_meta_path and os.path.exists(temp_meta_path):
+                        try:
+                            os.remove(temp_meta_path)
+                        except Exception:
+                            pass
+                    if w and h:
+                        with DB_WRITE_LOCK:
+                            try:
+                                conn.execute(
+                                    "UPDATE media SET width = ?, height = ?, latitude = COALESCE(latitude, ?), longitude = COALESCE(longitude, ?), exif_json = ? WHERE id = ?",
+                                    (w, h, lat, lon, json.dumps(exif_dict), media_id)
+                                )
+                                conn.commit()
+                            except Exception:
+                                pass
 
-        with smbclient.open_file(unc_file, mode="rb") as rf:
-            data = rf.read()
-        if data:
+                # Transpose according to EXIF orientation before generating thumbnail
+                try:
+                    img = ImageOps.exif_transpose(img)
+                except Exception:
+                    pass
+                if img.mode not in ("RGB", "L"):
+                    img = img.convert("RGB")
+                img.thumbnail((360, 360), Image.Resampling.LANCZOS)
+                img.save(thumb_path, format="JPEG", quality=78, optimize=True)
+        return thumb_path
+    except Exception:
+        return local_source
+
+
+def fetch_smb_file_cached(media_id, row, conn):
+    """
+    Streams full-resolution SMB file on-demand when opened in Lightbox.
+    """
+    os.makedirs(SMB_CACHE_DIR, exist_ok=True)
+    smb_uri = row["file_path"]
+    ext = os.path.splitext(smb_uri)[1].lower() or ".jpg"
+    url_hash = hashlib.sha1(smb_uri.encode("utf-8")).hexdigest()[:12]
+    for candidate in (
+        os.path.join(SMB_CACHE_DIR, f"media_{media_id}_{url_hash}{ext}"),
+        os.path.join(SMB_CACHE_DIR, f"smb_{url_hash}{ext}")
+    ):
+        if os.path.exists(candidate) and os.path.getsize(candidate) > 0:
+            return candidate
+
+    cache_file = os.path.join(SMB_CACHE_DIR, f"media_{media_id}_{url_hash}{ext}")
+    data = fetch_smb_bytes(media_id, smb_uri, conn)
+    if data:
+        try:
             with open(cache_file, "wb") as wf:
                 wf.write(data)
+            # Ensure full EXIF and dimensions are updated in SQLite if not yet done
+            if not row["width"] or not row["height"]:
+                fname = os.path.basename(smb_uri.replace("\\", "/"))
+                w, h, _, dt_str, lat, lon, exif_dict = extract_full_metadata(
+                    cache_file,
+                    display_filename=fname,
+                    fallback_dt=row["date_taken"],
+                    fallback_lat=row["latitude"],
+                    fallback_lon=row["longitude"],
+                    fallback_size=len(data)
+                )
+                if w and h:
+                    with DB_WRITE_LOCK:
+                        try:
+                            conn.execute(
+                                "UPDATE media SET width = ?, height = ?, latitude = COALESCE(latitude, ?), longitude = COALESCE(longitude, ?), exif_json = ? WHERE id = ?",
+                                (w, h, lat, lon, json.dumps(exif_dict), media_id)
+                            )
+                            conn.commit()
+                        except Exception:
+                            pass
             return cache_file
-    except Exception:
-        pass
+        except Exception:
+            pass
     return None
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=60.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 60000;")
     return conn
 
 
-def backfill_media_exif(conn):
+def backfill_local_media_exif(conn):
     """
-    Ensures every row in media has accurate width, height, and pre-computed exif_json in SQLite
-    for instantaneous <1ms frontend rendering.
+    Backfills EXIF & dimensions for local disk files only (SMB files are extracted lazily on view).
     """
     rows = conn.execute(
-        "SELECT id, album_name, file_path, date_taken, latitude, longitude, width, height, exif_json FROM media"
+        "SELECT id, album_name, file_path, date_taken, latitude, longitude, width, height, exif_json FROM media WHERE (width IS NULL OR width = 0 OR exif_json IS NULL OR exif_json = '') AND file_path NOT LIKE 'smb://%'"
     ).fetchall()
 
     demo_camera_profiles = {
@@ -630,16 +831,11 @@ def backfill_media_exif(conn):
 
     updated = False
     for r in rows:
-        if r["width"] and r["height"] and r["exif_json"]:
-            continue
         fpath = r["file_path"]
-        local_p = None
-        fname = os.path.basename(fpath.replace("\\", "/"))
         if is_smb_path(fpath):
-            local_p = fetch_smb_file_cached(r["id"], fpath, conn)
-        else:
-            local_p = fpath if os.path.exists(fpath) else resolve_source_path(fpath)
-
+            continue
+        local_p = fpath if os.path.exists(fpath) else resolve_source_path(fpath)
+        fname = os.path.basename(fpath.replace("\\", "/"))
         w, h, fsize, dt_str, lat, lon, exif_dict = extract_full_metadata(
             local_p,
             display_filename=fname,
@@ -647,9 +843,7 @@ def backfill_media_exif(conn):
             fallback_lat=r["latitude"],
             fallback_lon=r["longitude"]
         )
-
-        # If a demo sample image didn't have embedded camera EXIF tags, enrich with its album's camera profile
-        if not is_smb_path(fpath) and exif_dict["camera_info"]["make_model"] == "—" and r["album_name"] in demo_camera_profiles:
+        if exif_dict["camera_info"]["make_model"] == "—" and r["album_name"] in demo_camera_profiles:
             cam, lens, fl, ap, exp, iso, sw = demo_camera_profiles[r["album_name"]]
             exif_dict["camera_info"]["make_model"] = cam
             exif_dict["camera_info"]["lens"] = lens
@@ -674,8 +868,9 @@ def backfill_media_exif(conn):
 
 
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(SMB_CACHE_DIR, exist_ok=True)
+    os.makedirs(THUMB_CACHE_DIR, exist_ok=True)
     conn = get_db()
     c = conn.cursor()
     c.execute("PRAGMA journal_mode = WAL;")
@@ -685,6 +880,13 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            token TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
     """)
@@ -731,19 +933,14 @@ def init_db():
     if "sync_status" not in existing_cols:
         c.execute("ALTER TABLE sources_config ADD COLUMN sync_status TEXT DEFAULT '';")
 
-    all_srcs = c.execute("SELECT id, album_name, path_location, smb_username FROM sources_config ORDER BY id ASC").fetchall()
-    seen_smb_albums = {}
-    for s in all_srcs:
-        if is_smb_path(s["path_location"]):
-            parsed = parse_smb_path(s["path_location"])
-            norm_path = parsed[3] if parsed else s["path_location"]
-            key = (s["album_name"].strip().lower(), norm_path.lower())
-            if key in seen_smb_albums:
-                c.execute("DELETE FROM sources_config WHERE id = ?", (s["id"],))
-            else:
-                seen_smb_albums[key] = s["id"]
-                if s["path_location"] != norm_path:
-                    c.execute("UPDATE sources_config SET path_location = ? WHERE id = ?", (norm_path, s["id"]))
+    # Encrypt any existing plaintext SMB credentials at rest in sources_config
+    for r in c.execute("SELECT id, smb_username, smb_password FROM sources_config").fetchall():
+        u_raw = r["smb_username"] or ""
+        p_raw = r["smb_password"] or ""
+        u_enc = encrypt_secret(u_raw) if u_raw and not u_raw.startswith("enc:") else u_raw
+        p_enc = encrypt_secret(p_raw) if p_raw and not p_raw.startswith("enc:") else p_raw
+        if u_enc != u_raw or p_enc != p_raw:
+            c.execute("UPDATE sources_config SET smb_username = ?, smb_password = ? WHERE id = ?", (u_enc, p_enc, r["id"]))
 
     media_schema = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='media'").fetchone()
     if media_schema and "file_path TEXT NOT NULL UNIQUE" in (media_schema[0] or ""):
@@ -816,7 +1013,6 @@ def init_db():
             PRIMARY KEY (album_name, media_id)
         );
     """)
-
     c.execute("""
         CREATE TABLE IF NOT EXISTS sharing_albums (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -831,8 +1027,18 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_media_date ON media(date_taken);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_media_album ON media(album_name);")
 
-    c.execute("DELETE FROM users WHERE username = 'admin' AND password_hash = 'admin'")
-    c.execute("INSERT OR IGNORE INTO users (username, password_hash) VALUES (?, ?)", ("demo", "demo"))
+    # FIX 1: Remove/invalidate 'demo' and 'admin' accounts if ANY custom user account exists!
+    c.execute("DELETE FROM users WHERE username = 'admin'")
+    custom_user_count = c.execute("SELECT COUNT(*) FROM users WHERE LOWER(username) NOT IN ('demo', 'admin')").fetchone()[0]
+    if custom_user_count > 0:
+        c.execute("DELETE FROM users WHERE LOWER(username) IN ('demo', 'admin')")
+        c.execute("DELETE FROM user_sessions WHERE LOWER(username) IN ('demo', 'admin')")
+    else:
+        c.execute("INSERT OR IGNORE INTO users (username, password_hash) VALUES (?, ?)", ("demo", "demo"))
+
+    # Load active sessions into memory
+    for srow in c.execute("SELECT token, username FROM user_sessions").fetchall():
+        ACTIVE_SESSIONS[srow["token"]] = srow["username"]
 
     existing_sources = c.execute("SELECT COUNT(*) FROM sources_config").fetchone()[0]
     existing_media = c.execute("SELECT COUNT(*) FROM media").fetchone()[0]
@@ -869,88 +1075,104 @@ def init_db():
                 INSERT OR IGNORE INTO media (source_id, album_name, file_path, file_type, date_taken, latitude, longitude, caption)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (src_map.get(album), album, abs_path, "image", dt, lat, lon, caption))
-    else:
-        c.execute("""
-            UPDATE media
-            SET source_id = (SELECT id FROM sources_config WHERE sources_config.album_name = media.album_name LIMIT 1)
-            WHERE source_id IS NULL
-        """)
 
     conn.commit()
-    sync_all_sources(conn)
-    backfill_media_exif(conn)
+    backfill_local_media_exif(conn)
     conn.close()
 
 
 def sync_all_sources(conn):
-    sources = conn.execute("SELECT id, album_name, path_location, smb_username, smb_password FROM sources_config").fetchall()
-    added_count = 0
-    for src in sources:
-        raw_p = src["path_location"]
-        if is_smb_path(raw_p):
-            ok, status_msg, smb_count = test_or_sync_smb_share(
-                raw_p,
-                smb_user=src["smb_username"] or "",
-                smb_pass=src["smb_password"] or "",
-                conn=conn,
-                src_id=src["id"],
-                album_name=src["album_name"]
-            )
-            conn.execute(
-                "UPDATE sources_config SET last_synced = datetime('now'), sync_status = ? WHERE id = ?",
-                (status_msg, src["id"])
-            )
-            if ok:
-                added_count += smb_count
-        else:
-            resolved_p = resolve_source_path(raw_p)
-            if resolved_p and os.path.exists(resolved_p):
-                file_total = 0
-                for root, _, files in os.walk(resolved_p):
-                    for f in sorted(files):
-                        if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-                            file_total += 1
-                            full_p = os.path.join(root, f)
-                            existing_meta = conn.execute(
-                                "SELECT date_taken, latitude, longitude, caption, width, height, exif_json FROM media WHERE file_path = ? LIMIT 1",
-                                (full_p,)
-                            ).fetchone()
-                            if existing_meta and existing_meta["width"] and existing_meta["exif_json"]:
-                                dt = existing_meta["date_taken"]
-                                lat = existing_meta["latitude"]
-                                lon = existing_meta["longitude"]
-                                cap = existing_meta["caption"] or ""
-                                w = existing_meta["width"]
-                                h = existing_meta["height"]
-                                ex_json = existing_meta["exif_json"]
-                            else:
-                                fallback_dt = existing_meta["date_taken"] if existing_meta and existing_meta["date_taken"] else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                fallback_lat = existing_meta["latitude"] if existing_meta else None
-                                fallback_lon = existing_meta["longitude"] if existing_meta else None
-                                cap = existing_meta["caption"] if existing_meta and existing_meta["caption"] else ""
-                                w, h, _, dt, lat, lon, exif_dict = extract_full_metadata(
-                                    full_p, display_filename=f, fallback_dt=fallback_dt, fallback_lat=fallback_lat, fallback_lon=fallback_lon
-                                )
-                                ex_json = json.dumps(exif_dict)
+    """
+    Synchronizes all configured sources and returns (added_count, errors_list, source_statuses).
+    """
+    with SYNC_LOCK:
+        sources = conn.execute("SELECT id, album_name, path_location, smb_username, smb_password FROM sources_config").fetchall()
+        added_count = 0
+        errors_list = []
+        source_statuses = []
 
-                            cur = conn.execute("""
-                                INSERT OR IGNORE INTO media (source_id, album_name, file_path, file_type, date_taken, latitude, longitude, caption, width, height, exif_json)
-                                VALUES (?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?)
-                            """, (src["id"], src["album_name"], full_p, dt, lat, lon, cap, w, h, ex_json))
-                            if cur.rowcount > 0:
-                                added_count += 1
-                conn.execute(
-                    "UPDATE sources_config SET last_synced = datetime('now'), sync_status = ? WHERE id = ?",
-                    (f"OK ({file_total} local files indexed)", src["id"])
+        for src in sources:
+            raw_p = src["path_location"]
+            album_name = src["album_name"]
+            if is_smb_path(raw_p):
+                ok, status_msg, smb_count = test_or_sync_smb_share(
+                    raw_p,
+                    smb_user=src["smb_username"] or "",
+                    smb_pass=src["smb_password"] or "",
+                    conn=conn,
+                    src_id=src["id"],
+                    album_name=album_name
                 )
+                with DB_WRITE_LOCK:
+                    conn.execute(
+                        "UPDATE sources_config SET last_synced = datetime('now'), sync_status = ? WHERE id = ?",
+                        (status_msg, src["id"])
+                    )
+                    conn.commit()
+                source_statuses.append({"album_name": album_name, "ok": ok, "message": status_msg})
+                if ok:
+                    added_count += smb_count
+                else:
+                    errors_list.append({"album_name": album_name, "path": raw_p, "error": status_msg})
             else:
-                conn.execute(
-                    "UPDATE sources_config SET last_synced = datetime('now'), sync_status = ? WHERE id = ?",
-                    (f"Directory not found on container filesystem: {raw_p}", src["id"])
-                )
-    conn.commit()
-    backfill_media_exif(conn)
-    return added_count
+                resolved_p = resolve_source_path(raw_p)
+                if resolved_p and os.path.exists(resolved_p):
+                    file_total = 0
+                    for root, _, files in os.walk(resolved_p):
+                        for f in sorted(files):
+                            if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                                file_total += 1
+                                full_p = os.path.join(root, f)
+                                existing_meta = conn.execute(
+                                    "SELECT date_taken, latitude, longitude, caption, width, height, exif_json FROM media WHERE file_path = ? LIMIT 1",
+                                    (full_p,)
+                                ).fetchone()
+                                if existing_meta and existing_meta["width"] and existing_meta["exif_json"]:
+                                    dt = existing_meta["date_taken"]
+                                    lat = existing_meta["latitude"]
+                                    lon = existing_meta["longitude"]
+                                    cap = existing_meta["caption"] or ""
+                                    w = existing_meta["width"]
+                                    h = existing_meta["height"]
+                                    ex_json = existing_meta["exif_json"]
+                                else:
+                                    fallback_dt = existing_meta["date_taken"] if existing_meta and existing_meta["date_taken"] else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    fallback_lat = existing_meta["latitude"] if existing_meta else None
+                                    fallback_lon = existing_meta["longitude"] if existing_meta else None
+                                    cap = existing_meta["caption"] if existing_meta and existing_meta["caption"] else ""
+                                    w, h, _, dt, lat, lon, exif_dict = extract_full_metadata(
+                                        full_p, display_filename=f, fallback_dt=fallback_dt, fallback_lat=fallback_lat, fallback_lon=fallback_lon
+                                    )
+                                    ex_json = json.dumps(exif_dict)
+
+                                with DB_WRITE_LOCK:
+                                    cur = conn.execute("""
+                                        INSERT OR IGNORE INTO media (source_id, album_name, file_path, file_type, date_taken, latitude, longitude, caption, width, height, exif_json)
+                                        VALUES (?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?)
+                                    """, (src["id"], album_name, full_p, dt, lat, lon, cap, w, h, ex_json))
+                                    if cur.rowcount > 0:
+                                        added_count += 1
+                    status_msg = f"OK ({file_total} local files indexed)"
+                    with DB_WRITE_LOCK:
+                        conn.execute(
+                            "UPDATE sources_config SET last_synced = datetime('now'), sync_status = ? WHERE id = ?",
+                            (status_msg, src["id"])
+                        )
+                        conn.commit()
+                    source_statuses.append({"album_name": album_name, "ok": True, "message": status_msg})
+                else:
+                    err_msg = f"Directory not found on container filesystem: {raw_p}"
+                    with DB_WRITE_LOCK:
+                        conn.execute(
+                            "UPDATE sources_config SET last_synced = datetime('now'), sync_status = ? WHERE id = ?",
+                            (err_msg, src["id"])
+                        )
+                        conn.commit()
+                    source_statuses.append({"album_name": album_name, "ok": False, "message": err_msg})
+                    errors_list.append({"album_name": album_name, "path": raw_p, "error": err_msg})
+
+        backfill_local_media_exif(conn)
+        return added_count, errors_list, source_statuses
 
 
 def get_all_albums_summary(conn):
@@ -1052,22 +1274,90 @@ def get_all_albums_summary(conn):
 
 
 class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
-    def send_json(self, data, status=200):
+    def log_message(self, format_str, *args):
+        # Scrub any sensitive tokens from request logs
+        msg = format_str % args
+        if "auth_token=" in msg:
+            msg = msg.split("auth_token=")[0] + "auth_token=***"
+        print(f"{self.address_string()} - - [{self.log_date_time_string()}] {msg}")
+
+    def send_json(self, data, status=200, extra_headers=None):
         body = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Memoria-User")
+        if extra_headers:
+            for hk, hv in extra_headers.items():
+                self.send_header(hk, hv)
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            pass
+
+    def _resolve_session_token(self, tok):
+        if not tok:
+            return None
+        if tok in ACTIVE_SESSIONS:
+            return ACTIVE_SESSIONS[tok]
+        try:
+            conn = get_db()
+            row = conn.execute("SELECT username FROM user_sessions WHERE token = ?", (tok,)).fetchone()
+            conn.close()
+            if row:
+                ACTIVE_SESSIONS[tok] = row["username"]
+                return row["username"]
+        except Exception:
+            pass
+        return None
+
+    def get_authenticated_user(self, query=None):
+        # 1. Check Authorization: Bearer <token> or X-Memoria-Auth
+        auth_hdr = self.headers.get("Authorization", "")
+        if auth_hdr.startswith("Bearer "):
+            u = self._resolve_session_token(auth_hdr[7:].strip())
+            if u:
+                return u
+        x_hdr = self.headers.get("X-Memoria-Auth", "").strip()
+        if x_hdr:
+            u = self._resolve_session_token(x_hdr)
+            if u:
+                return u
+
+        # 2. Check Cookie memoria_token=<token>
+        cookie_hdr = self.headers.get("Cookie", "")
+        for part in cookie_hdr.split(";"):
+            part = part.strip()
+            if part.startswith("memoria_token="):
+                tok = part[len("memoria_token="):].strip()
+                u = self._resolve_session_token(tok)
+                if u:
+                    return u
+
+        # 3. Check query param auth_token or share_token
+        if query:
+            tok = (query.get("auth_token", [""])[0] or "").strip()
+            u = self._resolve_session_token(tok)
+            if u:
+                return u
+            share_tok = (query.get("share_token", [""])[0] or "").strip()
+            if share_tok:
+                conn = get_db()
+                row = conn.execute("SELECT id FROM sharing_albums WHERE share_token = ?", (share_tok,)).fetchone()
+                conn.close()
+                if row:
+                    return f"share:{share_tok}"
+
+        return None
 
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Memoria-User")
         self.end_headers()
 
     def do_HEAD(self):
@@ -1104,10 +1394,57 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Length", str(len(content)))
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
-            self.wfile.write(content)
+            try:
+                self.wfile.write(content)
+            except BrokenPipeError:
+                pass
             return
 
-        elif path == "/api/media/albums":
+        elif path == "/api/auth/public-status":
+            conn = get_db()
+            custom_count = conn.execute("SELECT COUNT(*) FROM users WHERE LOWER(username) NOT IN ('demo', 'admin')").fetchone()[0]
+            conn.close()
+            auth_user = self.get_authenticated_user(query)
+            self.send_json({
+                "demo_active": (custom_count == 0),
+                "authenticated": bool(auth_user),
+                "username": auth_user or "",
+                "transport_key": TRANSPORT_KEY
+            })
+            return
+
+        elif path == "/api/share/info":
+            token = query.get("token", [""])[0].strip()
+            conn = get_db()
+            row = conn.execute(
+                "SELECT share_token, album_name, media_ids, created_at FROM sharing_albums WHERE share_token = ?",
+                (token,)
+            ).fetchone()
+            conn.close()
+            if not row:
+                self.send_json({"exists": False, "error": "Shared album link not found or expired."}, status=404)
+                return
+            try:
+                mids = json.loads(row["media_ids"] or "[]")
+            except Exception:
+                mids = []
+            self.send_json({
+                "exists": True,
+                "share_token": row["share_token"],
+                "album_name": row["album_name"],
+                "media_count": len(mids),
+                "created_at": row["created_at"],
+                "requires_passcode": True
+            })
+            return
+
+        # All remaining API GET endpoints require authenticated user credentials
+        auth_user = self.get_authenticated_user(query)
+        if path.startswith("/api/") and not auth_user:
+            self.send_json({"error": "Authentication required. Please sign in."}, status=401)
+            return
+
+        if path == "/api/media/albums":
             conn = get_db()
             albums = get_all_albums_summary(conn)
             conn.close()
@@ -1132,21 +1469,31 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             order_sql = order_map.get(sort, "date_taken DESC, id DESC")
 
             conn = get_db()
-            where = ["1=1"]
-            params = []
+            # Compute album min_date and max_date (before date_from/date_to filter) for the sliding date bar!
+            album_where = ["1=1"]
+            album_params = []
+            if album:
+                album_where.append("(album_name = ? OR id IN (SELECT media_id FROM virtual_album_items WHERE album_name = ?))")
+                album_params.extend([album, album])
+            bounds_row = conn.execute(
+                f"SELECT MIN(date_taken), MAX(date_taken) FROM media WHERE {' AND '.join(album_where)}",
+                album_params
+            ).fetchone()
+            album_min_date = (bounds_row[0] or "")[:10] if bounds_row and bounds_row[0] else ""
+            album_max_date = (bounds_row[1] or "")[:10] if bounds_row and bounds_row[1] else ""
+
+            where = list(album_where)
+            params = list(album_params)
 
             if search:
                 where.append("(caption LIKE ? OR album_name LIKE ?)")
                 params.extend([f"%{search}%", f"%{search}%"])
             if date_from:
                 where.append("date_taken >= ?")
-                params.append(date_from)
+                params.append(date_from + " 00:00:00" if len(date_from) == 10 else date_from)
             if date_to:
                 where.append("date_taken <= ?")
-                params.append(date_to)
-            if album:
-                where.append("(album_name = ? OR id IN (SELECT media_id FROM virtual_album_items WHERE album_name = ?))")
-                params.extend([album, album])
+                params.append(date_to + " 23:59:59" if len(date_to) == 10 else date_to)
 
             where_sql = " AND ".join(where)
             total = conn.execute(f"SELECT COUNT(*) FROM media WHERE {where_sql}", params).fetchone()[0]
@@ -1175,13 +1522,66 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                     "exif": exif_obj
                 })
             conn.close()
-            self.send_json({"total": total, "items": items})
+            self.send_json({
+                "total": total,
+                "album_min_date": album_min_date,
+                "album_max_date": album_max_date,
+                "items": items
+            })
             return
+
+        elif path.startswith("/api/stream/thumb/"):
+            media_id = path.split("/")[-1]
+            conn = get_db()
+            row = conn.execute(
+                "SELECT id, file_path, file_type, date_taken, latitude, longitude, width, height FROM media WHERE id = ?",
+                (media_id,)
+            ).fetchone()
+            if not row:
+                conn.close()
+                self.send_error(404, "Media not found")
+                return
+
+            thumb_p = get_or_create_thumbnail(media_id, row, conn)
+            conn.close()
+            if thumb_p and os.path.exists(thumb_p):
+                with open(thumb_p, "rb") as f:
+                    content = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Cache-Control", "public, max-age=604800")
+                self.end_headers()
+                try:
+                    self.wfile.write(content)
+                except BrokenPipeError:
+                    pass
+                return
+            else:
+                fname = os.path.basename((row["file_path"] or "").replace("\\", "/"))[:28]
+                svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="360" height="360" viewBox="0 0 360 360">
+                  <rect width="360" height="360" fill="#18181b"/>
+                  <text x="180" y="160" text-anchor="middle" fill="#71717a" font-family="sans-serif" font-size="14" font-weight="bold">SMB Share Offline / Auth</text>
+                  <text x="180" y="190" text-anchor="middle" fill="#52525b" font-family="monospace" font-size="11">{fname}</text>
+                </svg>'''.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "image/svg+xml")
+                self.send_header("Content-Length", str(len(svg)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                try:
+                    self.wfile.write(svg)
+                except BrokenPipeError:
+                    pass
+                return
 
         elif path.startswith("/api/stream/file/"):
             media_id = path.split("/")[-1]
             conn = get_db()
-            row = conn.execute("SELECT file_path, file_type FROM media WHERE id = ?", (media_id,)).fetchone()
+            row = conn.execute(
+                "SELECT id, file_path, file_type, date_taken, latitude, longitude, width, height FROM media WHERE id = ?",
+                (media_id,)
+            ).fetchone()
             if not row:
                 conn.close()
                 self.send_error(404, "Media not found")
@@ -1189,7 +1589,7 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
 
             fpath = row["file_path"]
             if is_smb_path(fpath):
-                cached_p = fetch_smb_file_cached(media_id, fpath, conn)
+                cached_p = fetch_smb_file_cached(media_id, row, conn)
                 conn.close()
                 if cached_p and os.path.exists(cached_p):
                     fpath = cached_p
@@ -1210,7 +1610,10 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(content)))
                 self.send_header("Cache-Control", "public, max-age=86400")
                 self.end_headers()
-                self.wfile.write(content)
+                try:
+                    self.wfile.write(content)
+                except BrokenPipeError:
+                    pass
                 return
             else:
                 self.send_error(404, "File missing on disk")
@@ -1221,46 +1624,23 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             rows = conn.execute(
                 "SELECT id, album_name, path_location, tags, last_synced, smb_username, smb_password, sync_status FROM sources_config ORDER BY id ASC"
             ).fetchall()
-            items = [
-                {
+            items = []
+            for r in rows:
+                dec_user = decrypt_secret(r["smb_username"] or "")
+                has_pw = bool(decrypt_secret(r["smb_password"] or ""))
+                items.append({
                     "id": r["id"],
                     "album_name": r["album_name"],
                     "path_location": r["path_location"],
                     "tags": r["tags"],
                     "last_synced": r["last_synced"],
-                    "smb_username": r["smb_username"] or "",
-                    "smb_password": r["smb_password"] or "",
+                    "smb_username": dec_user,
+                    "has_smb_password": has_pw,
+                    "smb_password": "••••••••" if has_pw else "",
                     "sync_status": r["sync_status"] or ""
-                }
-                for r in rows
-            ]
+                })
             conn.close()
             self.send_json(items)
-            return
-
-        elif path == "/api/share/info":
-            token = query.get("token", [""])[0].strip()
-            conn = get_db()
-            row = conn.execute(
-                "SELECT share_token, album_name, media_ids, created_at FROM sharing_albums WHERE share_token = ?",
-                (token,)
-            ).fetchone()
-            conn.close()
-            if not row:
-                self.send_json({"exists": False, "error": "Shared album link not found or expired."}, status=404)
-                return
-            try:
-                mids = json.loads(row["media_ids"] or "[]")
-            except Exception:
-                mids = []
-            self.send_json({
-                "exists": True,
-                "share_token": row["share_token"],
-                "album_name": row["album_name"],
-                "media_count": len(mids),
-                "created_at": row["created_at"],
-                "requires_passcode": True
-            })
             return
 
         elif path == "/api/share/list":
@@ -1297,19 +1677,12 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             sources_count = conn.execute("SELECT COUNT(*) FROM sources_config").fetchone()[0]
             albums = get_all_albums_summary(conn)
             conn.close()
-            net_urls = get_local_network_urls()
-            net_badges = "".join([f'<a href="{u}" class="px-2.5 py-1 bg-zinc-950 border border-zinc-800 hover:border-blue-500 rounded text-xs font-mono text-blue-400">{u}</a>' for u in net_urls])
-
             html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>Memoria - Backend Diagnostics</title>
   <link rel="stylesheet" href="/vendor/tailwind.css" />
-  <style>
-    body {{ background-color: #09090b; color: #f4f4f5; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
-    .card {{ background-color: #18181b; border: 1px solid #27272a; border-radius: 12px; padding: 20px; }}
-  </style>
 </head>
 <body class="bg-zinc-950 text-zinc-100 min-h-screen p-8">
   <div class="max-w-4xl mx-auto space-y-6">
@@ -1318,11 +1691,10 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
         <h1 class="text-2xl font-bold flex items-center gap-2">
           <span class="text-blue-500">🛡️</span> Memoria Backend Service
         </h1>
-        <p class="text-xs text-zinc-400 mt-1">Status: Active & Operational (SQLite WAL Mode + Native SMB2/SMB3 Client + Pre-Indexed EXIF)</p>
+        <p class="text-xs text-zinc-400 mt-1">Status: Active & Operational (SQLite WAL + Encrypted SMB + Thumbnail Cache)</p>
       </div>
       <a href="/" class="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded font-medium">Open Frontend Viewer &rarr;</a>
     </div>
-
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
       <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
         <div class="text-xs text-zinc-400 uppercase font-semibold">Indexed Media Files</div>
@@ -1333,15 +1705,8 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
         <div class="text-3xl font-bold text-blue-400 mt-1">{sources_count}</div>
       </div>
       <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-        <div class="text-xs text-zinc-400 uppercase font-semibold">Total Albums (Source & Virtual)</div>
+        <div class="text-xs text-zinc-400 uppercase font-semibold">Total Albums</div>
         <div class="text-3xl font-bold text-purple-400 mt-1">{len(albums)}</div>
-      </div>
-    </div>
-
-    <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-3">
-      <h2 class="text-sm font-bold uppercase tracking-wider text-zinc-300">Local Network Access URLs (All Interfaces: {HOST}:{PORT})</h2>
-      <div class="flex flex-wrap gap-2">
-        {net_badges}
       </div>
     </div>
   </div>
@@ -1359,6 +1724,7 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
         try:
@@ -1367,299 +1733,49 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             payload = {}
 
         if path == "/api/auth/login":
-            u = payload.get("username", "").strip()
-            p = payload.get("password", "")
+            u = decode_transport_secret(payload.get("username", "")).strip()
+            p = decode_transport_secret(payload.get("password", ""))
             conn = get_db()
+            custom_count = conn.execute("SELECT COUNT(*) FROM users WHERE LOWER(username) NOT IN ('demo', 'admin')").fetchone()[0]
+            if custom_count > 0 and u.lower() in ("demo", "admin"):
+                conn.execute("DELETE FROM users WHERE LOWER(username) IN ('demo', 'admin')")
+                conn.commit()
+                conn.close()
+                self.send_json({"error": "Default demo account has been disabled for security."}, status=401)
+                return
+
             row = conn.execute("SELECT username, password_hash FROM users WHERE username = ? AND password_hash = ?", (u, p)).fetchone()
-            conn.close()
             if row:
-                self.send_json({"token": "demo-session-token", "username": u})
+                tok = secrets.token_hex(24)
+                ACTIVE_SESSIONS[tok] = row["username"]
+                with DB_WRITE_LOCK:
+                    conn.execute("INSERT OR REPLACE INTO user_sessions (token, username) VALUES (?, ?)", (tok, row["username"]))
+                    conn.commit()
+                conn.close()
+                cookie = f"memoria_token={tok}; Path=/; SameSite=Lax; HttpOnly"
+                self.send_json(
+                    {"token": tok, "auth_token": tok, "username": row["username"], "demo_active": (custom_count == 0), "transport_key": TRANSPORT_KEY},
+                    extra_headers={"Set-Cookie": cookie}
+                )
             else:
+                conn.close()
                 self.send_json({"error": "Invalid username or password"}, status=401)
             return
 
-        elif path == "/api/auth/change-credentials":
-            curr_user = payload.get("current_username", "").strip()
-            curr_pass = payload.get("current_password", "")
-            new_user = payload.get("new_username", "").strip()
-            new_pass = payload.get("new_password", "")
-
-            if not new_user or not new_pass or len(new_pass) < 4:
-                self.send_json({"error": "New username and password (min 4 characters) are required."}, status=400)
-                return
-
-            conn = get_db()
-            user_row = conn.execute("SELECT id FROM users WHERE username = ? AND password_hash = ?", (curr_user, curr_pass)).fetchone()
-            if not user_row:
+        elif path == "/api/auth/logout":
+            auth_hdr = self.headers.get("Authorization", "")
+            tok = auth_hdr[7:].strip() if auth_hdr.startswith("Bearer ") else ""
+            if tok:
+                ACTIVE_SESSIONS.pop(tok, None)
+                conn = get_db()
+                with DB_WRITE_LOCK:
+                    conn.execute("DELETE FROM user_sessions WHERE token = ?", (tok,))
+                    conn.commit()
                 conn.close()
-                self.send_json({"error": "Current password is incorrect."}, status=401)
-                return
-
-            existing = conn.execute("SELECT id FROM users WHERE username = ? AND id != ?", (new_user, user_row["id"])).fetchone()
-            if existing:
-                conn.close()
-                self.send_json({"error": f"Username {new_user} is already in use."}, status=400)
-                return
-
-            conn.execute("UPDATE users SET username = ?, password_hash = ? WHERE id = ?", (new_user, new_pass, user_row["id"]))
-            conn.commit()
-            conn.close()
-            self.send_json({"status": "ok", "username": new_user, "message": "Credentials updated successfully."})
-            return
-
-        elif path == "/api/media/caption":
-            media_id = payload.get("id")
-            caption = payload.get("caption", "")
-            conn = get_db()
-            conn.execute("UPDATE media SET caption = ? WHERE id = ?", (caption, media_id))
-            conn.commit()
-            conn.close()
-            self.send_json({"status": "ok", "id": media_id, "caption": caption})
-            return
-
-        elif path == "/api/smb/test":
-            path_loc = (payload.get("path_location") or "").strip()
-            smb_user = (payload.get("smb_username") or "").strip()
-            smb_pass = payload.get("smb_password") or ""
-            if is_smb_path(path_loc):
-                ok, msg, count = test_or_sync_smb_share(path_loc, smb_user, smb_pass)
-                self.send_json({"ok": ok, "message": msg, "count": count}, status=200 if ok else 400)
-            else:
-                resolved = resolve_source_path(path_loc)
-                if resolved and os.path.exists(resolved):
-                    count = sum(
-                        1 for _, _, files in os.walk(resolved)
-                        for f in files if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
-                    )
-                    self.send_json({"ok": True, "message": f"Local folder accessible ({count} media files)", "count": count})
-                else:
-                    self.send_json({"ok": False, "message": f"Local path not found inside container: {path_loc}", "count": 0}, status=400)
-            return
-
-        elif path == "/api/config":
-            conn = get_db()
-            if isinstance(payload, list):
-                existing_rows = {
-                    r["id"]: r for r in conn.execute("SELECT id, album_name, path_location FROM sources_config").fetchall()
-                }
-                kept_ids = set()
-                kept_album_names = set()
-
-                for cfg in payload:
-                    album_name = (cfg.get("album_name") or "").strip()
-                    path_loc = (cfg.get("path_location") or "").strip()
-                    smb_user = (cfg.get("smb_username") or "").strip()
-                    smb_pass = cfg.get("smb_password") or ""
-                    if not album_name or not path_loc:
-                        continue
-                    if is_smb_path(path_loc):
-                        parsed_smb = parse_smb_path(path_loc)
-                        if parsed_smb:
-                            path_loc = parsed_smb[3]
-                    cfg_id = cfg.get("id")
-                    if cfg_id in existing_rows:
-                        old_name = existing_rows[cfg_id]["album_name"]
-                        conn.execute(
-                            "UPDATE sources_config SET album_name = ?, path_location = ?, smb_username = ?, smb_password = ? WHERE id = ?",
-                            (album_name, path_loc, smb_user, smb_pass, cfg_id)
-                        )
-                        if old_name != album_name:
-                            conn.execute(
-                                "UPDATE media SET album_name = ? WHERE source_id = ? OR album_name = ?",
-                                (album_name, cfg_id, old_name)
-                            )
-                        kept_ids.add(cfg_id)
-                        kept_album_names.add(album_name)
-                    else:
-                        cur = conn.execute(
-                            "INSERT INTO sources_config (album_name, path_location, smb_username, smb_password, last_synced) VALUES (?, ?, ?, ?, datetime('now'))",
-                            (album_name, path_loc, smb_user, smb_pass)
-                        )
-                        kept_ids.add(cur.lastrowid)
-                        kept_album_names.add(album_name)
-
-                for old_id, old_row in existing_rows.items():
-                    if old_id not in kept_ids:
-                        conn.execute("DELETE FROM media WHERE source_id = ?", (old_id,))
-                        if old_row["album_name"] not in kept_album_names:
-                            conn.execute("DELETE FROM media WHERE album_name = ? AND source_id IS NULL", (old_row["album_name"],))
-                        conn.execute("DELETE FROM sources_config WHERE id = ?", (old_id,))
-
-                conn.commit()
-                sync_all_sources(conn)
-                albums = get_all_albums_summary(conn)
-            else:
-                albums = get_all_albums_summary(conn)
-            conn.close()
-            self.send_json({"status": "saved", "albums": albums})
-            return
-
-        elif path == "/api/config/delete":
-            source_id = payload.get("id")
-            album_name = (payload.get("album_name") or "").strip()
-            conn = get_db()
-            if source_id:
-                row = conn.execute("SELECT album_name FROM sources_config WHERE id = ?", (source_id,)).fetchone()
-                conn.execute("DELETE FROM media WHERE source_id = ?", (source_id,))
-                conn.execute("DELETE FROM sources_config WHERE id = ?", (source_id,))
-                if row:
-                    remaining = conn.execute("SELECT COUNT(*) FROM sources_config WHERE album_name = ?", (row["album_name"],)).fetchone()[0]
-                    if remaining == 0:
-                        conn.execute("DELETE FROM media WHERE album_name = ?", (row["album_name"],))
-            elif album_name:
-                conn.execute("DELETE FROM media WHERE album_name = ?", (album_name,))
-                conn.execute("DELETE FROM sources_config WHERE album_name = ?", (album_name,))
-            conn.commit()
-            albums = get_all_albums_summary(conn)
-            conn.close()
-            self.send_json({"status": "deleted", "albums": albums})
-            return
-
-        elif path == "/api/sync":
-            conn = get_db()
-            if isinstance(payload, dict) and isinstance(payload.get("sources"), list):
-                existing_rows = {
-                    r["id"]: r for r in conn.execute("SELECT id, album_name, path_location FROM sources_config").fetchall()
-                }
-                kept_ids = set()
-                for cfg in payload["sources"]:
-                    album_name = (cfg.get("album_name") or "").strip()
-                    path_loc = (cfg.get("path_location") or "").strip()
-                    smb_user = (cfg.get("smb_username") or "").strip()
-                    smb_pass = cfg.get("smb_password") or ""
-                    if not album_name or not path_loc:
-                        continue
-                    if is_smb_path(path_loc):
-                        parsed_smb = parse_smb_path(path_loc)
-                        if parsed_smb:
-                            path_loc = parsed_smb[3]
-                    cfg_id = cfg.get("id")
-                    if cfg_id in existing_rows:
-                        old_name = existing_rows[cfg_id]["album_name"]
-                        conn.execute(
-                            "UPDATE sources_config SET album_name = ?, path_location = ?, smb_username = ?, smb_password = ? WHERE id = ?",
-                            (album_name, path_loc, smb_user, smb_pass, cfg_id)
-                        )
-                        if old_name != album_name:
-                            conn.execute(
-                                "UPDATE media SET album_name = ? WHERE source_id = ? OR album_name = ?",
-                                (album_name, cfg_id, old_name)
-                            )
-                        kept_ids.add(cfg_id)
-                    else:
-                        cur = conn.execute(
-                            "INSERT INTO sources_config (album_name, path_location, smb_username, smb_password, last_synced) VALUES (?, ?, ?, ?, datetime('now'))",
-                            (album_name, path_loc, smb_user, smb_pass)
-                        )
-                        kept_ids.add(cur.lastrowid)
-                for old_id, old_row in existing_rows.items():
-                    if old_id not in kept_ids:
-                        conn.execute("DELETE FROM media WHERE source_id = ?", (old_id,))
-                        conn.execute("DELETE FROM sources_config WHERE id = ?", (old_id,))
-                conn.commit()
-
-            added = sync_all_sources(conn)
-            albums = get_all_albums_summary(conn)
-            conn.close()
-            self.send_json({"status": "synced", "added": added, "albums": albums})
-            return
-
-        elif path == "/api/albums/virtual":
-            album_name = (payload.get("album_name") or "").strip()
-            media_ids = payload.get("media_ids") or []
-            if not album_name:
-                self.send_json({"error": "Album name is required."}, status=400)
-                return
-
-            conn = get_db()
-            conn.execute("INSERT OR IGNORE INTO virtual_albums (album_name) VALUES (?)", (album_name,))
-            added_count = 0
-            if isinstance(media_ids, list) and len(media_ids) > 0:
-                placeholders = ",".join(["?"] * len(media_ids))
-                valid_rows = conn.execute(f"SELECT id FROM media WHERE id IN ({placeholders})", media_ids).fetchall()
-                for vr in valid_rows:
-                    cur = conn.execute(
-                        "INSERT OR IGNORE INTO virtual_album_items (album_name, media_id) VALUES (?, ?)",
-                        (album_name, vr["id"])
-                    )
-                    if cur.rowcount > 0:
-                        added_count += 1
-            conn.commit()
-            albums = get_all_albums_summary(conn)
-            conn.close()
-            self.send_json({
-                "status": "ok",
-                "album_name": album_name,
-                "added_count": added_count,
-                "albums": albums
-            })
-            return
-
-        elif path == "/api/albums/virtual/delete":
-            album_name = (payload.get("album_name") or "").strip()
-            conn = get_db()
-            conn.execute("DELETE FROM virtual_album_items WHERE album_name = ?", (album_name,))
-            conn.execute("DELETE FROM virtual_albums WHERE album_name = ?", (album_name,))
-            conn.execute("DELETE FROM sharing_albums WHERE album_name = ?", (album_name,))
-            conn.commit()
-            albums = get_all_albums_summary(conn)
-            conn.close()
-            self.send_json({"status": "deleted", "albums": albums})
-            return
-
-        elif path == "/api/share":
-            album_name = (payload.get("album_name") or "").strip()
-            req_media_ids = payload.get("media_ids") or []
-            if not album_name:
-                album_name = f"Shared Album {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-
-            conn = get_db()
-            valid_ids = []
-            if isinstance(req_media_ids, list) and len(req_media_ids) > 0:
-                placeholders = ",".join(["?"] * len(req_media_ids))
-                rows = conn.execute(f"SELECT id FROM media WHERE id IN ({placeholders})", req_media_ids).fetchall()
-                valid_ids = [r["id"] for r in rows]
-            else:
-                rows = conn.execute("""
-                    SELECT DISTINCT id FROM media
-                    WHERE album_name = ? OR id IN (SELECT media_id FROM virtual_album_items WHERE album_name = ?)
-                """, (album_name, album_name)).fetchall()
-                valid_ids = [r["id"] for r in rows]
-
-            if not valid_ids:
-                conn.close()
-                self.send_json({
-                    "error": "Cannot share an empty album. Please select or link existing photos from the database first."
-                }, status=400)
-                return
-
-            conn.execute("INSERT OR IGNORE INTO virtual_albums (album_name) VALUES (?)", (album_name,))
-            for mid in valid_ids:
-                conn.execute(
-                    "INSERT OR IGNORE INTO virtual_album_items (album_name, media_id) VALUES (?, ?)",
-                    (album_name, mid)
-                )
-
-            share_token = "va_" + secrets.token_urlsafe(9).replace("-", "").replace("_", "")[:12]
-            passcode = f"{secrets.randbelow(10000):04d}"
-
-            conn.execute("""
-                INSERT INTO sharing_albums (share_token, passcode, album_name, media_ids)
-                VALUES (?, ?, ?, ?)
-            """, (share_token, passcode, album_name, json.dumps(valid_ids)))
-            conn.commit()
-            albums = get_all_albums_summary(conn)
-            conn.close()
-
-            self.send_json({
-                "status": "ok",
-                "share_token": share_token,
-                "passcode": passcode,
-                "album_name": album_name,
-                "media_count": len(valid_ids),
-                "share_url": f"/?share={share_token}",
-                "albums": albums
-            })
+            self.send_json(
+                {"status": "logged_out"},
+                extra_headers={"Set-Cookie": "memoria_token=; Path=/; Max-Age=0"}
+            )
             return
 
         elif path == "/api/share/verify":
@@ -1721,11 +1837,317 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             })
             return
 
+        # All other POST endpoints require authenticated user session
+        auth_user = self.get_authenticated_user(query)
+        if not auth_user or str(auth_user).startswith("share:"):
+            self.send_json({"error": "Authentication required. Please sign in."}, status=401)
+            return
+
+        if path == "/api/auth/change-credentials":
+            curr_user = decode_transport_secret(payload.get("current_username", "")).strip() or auth_user
+            curr_pass = decode_transport_secret(payload.get("current_password", ""))
+            new_user = decode_transport_secret(payload.get("new_username", "")).strip()
+            new_pass = decode_transport_secret(payload.get("new_password", ""))
+
+            if not new_user or not new_pass or len(new_pass) < 4:
+                self.send_json({"error": "New username and password (min 4 characters) are required."}, status=400)
+                return
+
+            conn = get_db()
+            user_row = conn.execute("SELECT id FROM users WHERE username = ? AND password_hash = ?", (curr_user, curr_pass)).fetchone()
+            if not user_row:
+                conn.close()
+                self.send_json({"error": "Current password is incorrect."}, status=401)
+                return
+
+            existing = conn.execute("SELECT id FROM users WHERE username = ? AND id != ?", (new_user, user_row["id"])).fetchone()
+            if existing:
+                conn.close()
+                self.send_json({"error": f"Username {new_user} is already in use."}, status=400)
+                return
+
+            with DB_WRITE_LOCK:
+                conn.execute("UPDATE users SET username = ?, password_hash = ? WHERE id = ?", (new_user, new_pass, user_row["id"]))
+                # FIX 1: If new_user is not 'demo', permanently remove any 'demo' or 'admin' accounts and sessions!
+                if new_user.lower() not in ("demo", "admin"):
+                    conn.execute("DELETE FROM users WHERE LOWER(username) IN ('demo', 'admin')")
+                    conn.execute("DELETE FROM user_sessions WHERE LOWER(username) IN ('demo', 'admin')")
+                    for k, v in list(ACTIVE_SESSIONS.items()):
+                        if v.lower() in ("demo", "admin"):
+                            ACTIVE_SESSIONS[k] = new_user
+                    conn.execute("UPDATE user_sessions SET username = ? WHERE LOWER(username) IN ('demo', 'admin')", (new_user,))
+                conn.commit()
+            conn.close()
+            self.send_json({"status": "ok", "username": new_user, "message": "Credentials updated and demo account permanently removed."})
+            return
+
+        elif path == "/api/media/caption":
+            media_id = payload.get("id")
+            caption = payload.get("caption", "")
+            conn = get_db()
+            with DB_WRITE_LOCK:
+                conn.execute("UPDATE media SET caption = ? WHERE id = ?", (caption, media_id))
+                conn.commit()
+            conn.close()
+            self.send_json({"status": "ok", "id": media_id, "caption": caption})
+            return
+
+        elif path == "/api/smb/test":
+            path_loc = (payload.get("path_location") or "").strip()
+            raw_user = payload.get("smb_username") or ""
+            raw_pass = payload.get("smb_password") or ""
+            src_id = payload.get("id")
+
+            smb_user = decode_transport_secret(raw_user).strip()
+            smb_pass = decode_transport_secret(raw_pass)
+
+            if smb_pass == "••••••••" and src_id:
+                conn = get_db()
+                row = conn.execute("SELECT smb_username, smb_password FROM sources_config WHERE id = ?", (src_id,)).fetchone()
+                conn.close()
+                if row:
+                    smb_pass = decrypt_secret(row["smb_password"] or "")
+                    if not smb_user:
+                        smb_user = decrypt_secret(row["smb_username"] or "")
+
+            if is_smb_path(path_loc):
+                _SMB_AUTH_FAIL_CACHE.clear()
+                ok, msg, count = test_or_sync_smb_share(path_loc, smb_user, smb_pass)
+                self.send_json({"ok": ok, "message": msg, "count": count}, status=200 if ok else 400)
+            else:
+                resolved = resolve_source_path(path_loc)
+                if resolved and os.path.exists(resolved):
+                    count = sum(
+                        1 for _, _, files in os.walk(resolved)
+                        for f in files if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+                    )
+                    self.send_json({"ok": True, "message": f"Local folder accessible ({count} media files)", "count": count})
+                else:
+                    self.send_json({"ok": False, "message": f"Local path not found inside container: {path_loc}", "count": 0}, status=400)
+            return
+
+        elif path == "/api/config" or path == "/api/sync":
+            try:
+                _SMB_AUTH_FAIL_CACHE.clear()
+                conn = get_db()
+                sources_list = payload if isinstance(payload, list) else (payload.get("sources") if isinstance(payload, dict) else None)
+
+                if isinstance(sources_list, list):
+                    existing_rows = {
+                        r["id"]: r for r in conn.execute("SELECT id, album_name, path_location, smb_username, smb_password FROM sources_config").fetchall()
+                    }
+                    kept_ids = set()
+                    kept_album_names = set()
+
+                    with DB_WRITE_LOCK:
+                        for cfg in sources_list:
+                            album_name = (cfg.get("album_name") or "").strip()
+                            path_loc = (cfg.get("path_location") or "").strip()
+                            raw_u = cfg.get("smb_username") or ""
+                            raw_p = cfg.get("smb_password") or ""
+                            if not album_name or not path_loc:
+                                continue
+
+                            dec_u = decode_transport_secret(raw_u).strip()
+                            dec_p = decode_transport_secret(raw_p)
+
+                            if is_smb_path(path_loc):
+                                parsed_smb = parse_smb_path(path_loc)
+                                if parsed_smb:
+                                    path_loc = parsed_smb[3]
+
+                            cfg_id = cfg.get("id")
+                            if cfg_id in existing_rows:
+                                old_row = existing_rows[cfg_id]
+                                old_name = old_row["album_name"]
+                                enc_u = encrypt_secret(dec_u) if dec_u else ""
+                                if dec_p == "••••••••":
+                                    enc_p = old_row["smb_password"] or ""
+                                else:
+                                    enc_p = encrypt_secret(dec_p) if dec_p else ""
+
+                                conn.execute(
+                                    "UPDATE sources_config SET album_name = ?, path_location = ?, smb_username = ?, smb_password = ? WHERE id = ?",
+                                    (album_name, path_loc, enc_u, enc_p, cfg_id)
+                                )
+                                if old_name != album_name:
+                                    conn.execute(
+                                        "UPDATE media SET album_name = ? WHERE source_id = ? OR album_name = ?",
+                                        (album_name, cfg_id, old_name)
+                                    )
+                                kept_ids.add(cfg_id)
+                                kept_album_names.add(album_name)
+                            else:
+                                enc_u = encrypt_secret(dec_u) if dec_u else ""
+                                enc_p = encrypt_secret(dec_p) if (dec_p and dec_p != "••••••••") else ""
+                                cur = conn.execute(
+                                    "INSERT INTO sources_config (album_name, path_location, smb_username, smb_password, last_synced) VALUES (?, ?, ?, ?, datetime('now'))",
+                                    (album_name, path_loc, enc_u, enc_p)
+                                )
+                                kept_ids.add(cur.lastrowid)
+                                kept_album_names.add(album_name)
+
+                        for old_id, old_row in existing_rows.items():
+                            if old_id not in kept_ids:
+                                conn.execute("DELETE FROM media WHERE source_id = ?", (old_id,))
+                                if old_row["album_name"] not in kept_album_names:
+                                    conn.execute("DELETE FROM media WHERE album_name = ? AND source_id IS NULL", (old_row["album_name"],))
+                                conn.execute("DELETE FROM sources_config WHERE id = ?", (old_id,))
+                        conn.commit()
+
+                added, errors_list, source_statuses = sync_all_sources(conn)
+                albums = get_all_albums_summary(conn)
+                total_indexed = conn.execute("SELECT COUNT(*) FROM media").fetchone()[0]
+                conn.close()
+                formatted_errors = [
+                    (f"[{e.get('album_name', 'Folder')}] {e.get('error', '')}" if isinstance(e, dict) else str(e))
+                    for e in (errors_list or [])
+                ]
+                self.send_json({
+                    "status": "synced" if path == "/api/sync" else "saved",
+                    "added": added,
+                    "total_indexed": total_indexed,
+                    "albums": albums,
+                    "errors": formatted_errors,
+                    "error_objects": errors_list,
+                    "source_statuses": source_statuses
+                })
+            except Exception as e:
+                self.send_json({
+                    "status": "error",
+                    "error": f"Reload/Sync failed: {str(e)}",
+                    "errors": [{"album_name": "System", "path": "", "error": str(e)}]
+                }, status=500)
+            return
+
+        elif path == "/api/config/delete":
+            source_id = payload.get("id")
+            album_name = (payload.get("album_name") or "").strip()
+            conn = get_db()
+            with DB_WRITE_LOCK:
+                if source_id:
+                    row = conn.execute("SELECT album_name FROM sources_config WHERE id = ?", (source_id,)).fetchone()
+                    conn.execute("DELETE FROM media WHERE source_id = ?", (source_id,))
+                    conn.execute("DELETE FROM sources_config WHERE id = ?", (source_id,))
+                    if row:
+                        remaining = conn.execute("SELECT COUNT(*) FROM sources_config WHERE album_name = ?", (row["album_name"],)).fetchone()[0]
+                        if remaining == 0:
+                            conn.execute("DELETE FROM media WHERE album_name = ?", (row["album_name"],))
+                elif album_name:
+                    conn.execute("DELETE FROM media WHERE album_name = ?", (album_name,))
+                    conn.execute("DELETE FROM sources_config WHERE album_name = ?", (album_name,))
+                conn.commit()
+            albums = get_all_albums_summary(conn)
+            conn.close()
+            self.send_json({"status": "deleted", "albums": albums})
+            return
+
+        elif path == "/api/albums/virtual":
+            album_name = (payload.get("album_name") or "").strip()
+            media_ids = payload.get("media_ids") or []
+            if not album_name:
+                self.send_json({"error": "Album name is required."}, status=400)
+                return
+
+            conn = get_db()
+            added_count = 0
+            with DB_WRITE_LOCK:
+                conn.execute("INSERT OR IGNORE INTO virtual_albums (album_name) VALUES (?)", (album_name,))
+                if isinstance(media_ids, list) and len(media_ids) > 0:
+                    placeholders = ",".join(["?"] * len(media_ids))
+                    valid_rows = conn.execute(f"SELECT id FROM media WHERE id IN ({placeholders})", media_ids).fetchall()
+                    for vr in valid_rows:
+                        cur = conn.execute(
+                            "INSERT OR IGNORE INTO virtual_album_items (album_name, media_id) VALUES (?, ?)",
+                            (album_name, vr["id"])
+                        )
+                        if cur.rowcount > 0:
+                            added_count += 1
+                conn.commit()
+            albums = get_all_albums_summary(conn)
+            conn.close()
+            self.send_json({
+                "status": "ok",
+                "album_name": album_name,
+                "added_count": added_count,
+                "albums": albums
+            })
+            return
+
+        elif path == "/api/albums/virtual/delete":
+            album_name = (payload.get("album_name") or "").strip()
+            conn = get_db()
+            with DB_WRITE_LOCK:
+                conn.execute("DELETE FROM virtual_album_items WHERE album_name = ?", (album_name,))
+                conn.execute("DELETE FROM virtual_albums WHERE album_name = ?", (album_name,))
+                conn.execute("DELETE FROM sharing_albums WHERE album_name = ?", (album_name,))
+                conn.commit()
+            albums = get_all_albums_summary(conn)
+            conn.close()
+            self.send_json({"status": "deleted", "albums": albums})
+            return
+
+        elif path == "/api/share":
+            album_name = (payload.get("album_name") or "").strip()
+            req_media_ids = payload.get("media_ids") or []
+            if not album_name:
+                album_name = f"Shared Album {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+            conn = get_db()
+            valid_ids = []
+            if isinstance(req_media_ids, list) and len(req_media_ids) > 0:
+                placeholders = ",".join(["?"] * len(req_media_ids))
+                rows = conn.execute(f"SELECT id FROM media WHERE id IN ({placeholders})", req_media_ids).fetchall()
+                valid_ids = [r["id"] for r in rows]
+            else:
+                rows = conn.execute("""
+                    SELECT DISTINCT id FROM media
+                    WHERE album_name = ? OR id IN (SELECT media_id FROM virtual_album_items WHERE album_name = ?)
+                """, (album_name, album_name)).fetchall()
+                valid_ids = [r["id"] for r in rows]
+
+            if not valid_ids:
+                conn.close()
+                self.send_json({
+                    "error": "Cannot share an empty album. Please select or link existing photos from the database first."
+                }, status=400)
+                return
+
+            share_token = "va_" + secrets.token_urlsafe(9).replace("-", "").replace("_", "")[:12]
+            passcode = f"{secrets.randbelow(10000):04d}"
+
+            with DB_WRITE_LOCK:
+                conn.execute("INSERT OR IGNORE INTO virtual_albums (album_name) VALUES (?)", (album_name,))
+                for mid in valid_ids:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO virtual_album_items (album_name, media_id) VALUES (?, ?)",
+                        (album_name, mid)
+                    )
+                conn.execute("""
+                    INSERT INTO sharing_albums (share_token, passcode, album_name, media_ids)
+                    VALUES (?, ?, ?, ?)
+                """, (share_token, passcode, album_name, json.dumps(valid_ids)))
+                conn.commit()
+            albums = get_all_albums_summary(conn)
+            conn.close()
+
+            self.send_json({
+                "status": "ok",
+                "share_token": share_token,
+                "passcode": passcode,
+                "album_name": album_name,
+                "media_count": len(valid_ids),
+                "share_url": f"/?share={share_token}",
+                "albums": albums
+            })
+            return
+
         elif path == "/api/share/delete":
             share_token = (payload.get("share_token") or "").strip()
             conn = get_db()
-            conn.execute("DELETE FROM sharing_albums WHERE share_token = ?", (share_token,))
-            conn.commit()
+            with DB_WRITE_LOCK:
+                conn.execute("DELETE FROM sharing_albums WHERE share_token = ?", (share_token,))
+                conn.commit()
             conn.close()
             self.send_json({"status": "deleted", "share_token": share_token})
             return

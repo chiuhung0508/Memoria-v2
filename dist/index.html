@@ -151,6 +151,64 @@
       line-height: 1.45;
       color: #f4f4f5;
     }
+
+    /* Dual-Handle Date Range Slider */
+    .dual-range-wrap {
+      position: relative;
+      width: 150px;
+      height: 18px;
+      display: flex;
+      align-items: center;
+    }
+    .dual-range-track {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 4px;
+      border-radius: 999px;
+      background: #3f3f46;
+      pointer-events: none;
+    }
+    .dual-range-fill {
+      position: absolute;
+      height: 4px;
+      border-radius: 999px;
+      background: var(--accent, #3b82f6);
+      pointer-events: none;
+    }
+    .dual-range-input {
+      position: absolute;
+      left: 0;
+      width: 100%;
+      height: 18px;
+      margin: 0;
+      background: none;
+      pointer-events: none;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    .dual-range-input::-webkit-slider-thumb {
+      pointer-events: auto;
+      -webkit-appearance: none;
+      appearance: none;
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: #3b82f6;
+      border: 2px solid #ffffff;
+      cursor: pointer;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+    }
+    .dual-range-input::-moz-range-thumb {
+      pointer-events: auto;
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: #3b82f6;
+      border: 2px solid #ffffff;
+      cursor: pointer;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+    }
   </style>
 </head>
 <body class="flex h-screen overflow-hidden text-xs select-none">
@@ -159,11 +217,11 @@
   <div id="login-modal" class="fixed inset-0 bg-black/85 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
     <div style="background-color: var(--bg-panel); border-color: var(--border-color);" class="border p-8 rounded-2xl w-80 shadow-2xl">
       <h2 class="text-base font-bold text-center mb-1">Memoria Access</h2>
-      <p class="text-[11px] text-zinc-400 mb-5 text-center">Default Demo: <code class="text-blue-400 font-mono">demo / demo</code></p>
+      <p id="demo-login-hint" class="text-[11px] text-zinc-400 mb-5 text-center">Default Demo: <code class="text-blue-400 font-mono">demo / demo</code></p>
       
       <div class="space-y-3">
-        <input id="login-user" type="text" value="demo" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-3 py-2 text-xs focus:outline-none" />
-        <input id="login-pass" type="password" value="demo" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-3 py-2 text-xs focus:outline-none" />
+        <input id="login-user" type="text" value="demo" placeholder="Username" onkeydown="if(event.key==='Enter') performLogin()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-3 py-2 text-xs focus:outline-none" />
+        <input id="login-pass" type="password" value="demo" placeholder="Password" onkeydown="if(event.key==='Enter') performLogin()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-3 py-2 text-xs focus:outline-none" />
         <button onclick="performLogin()" class="w-full mt-2 bg-blue-600 hover:bg-blue-500 py-2.5 rounded-lg font-semibold transition text-white text-xs">Sign In</button>
       </div>
       <p id="login-error" class="text-rose-500 text-[11px] mt-3 hidden text-center">Invalid credentials</p>
@@ -350,18 +408,35 @@
           <span id="active-album-title" class="font-bold text-blue-500 truncate max-w-[130px]">All Media</span>
         </div>
 
-        <!-- AUTO-HIDE DATE FILTER TRIGGER -->
-        <div class="relative">
-          <button id="btn-date-toggle" onclick="toggleDatePopover()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="flex items-center gap-1.5 border px-2.5 py-1.5 rounded-lg hover:border-blue-500 transition">
+        <!-- AUTO-HIDE DATE FILTER TRIGGER + SLIDING DATE RANGE BAR -->
+        <div class="relative flex items-center gap-2">
+          <button id="btn-date-toggle" onclick="toggleDatePopover()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="flex items-center gap-1.5 border px-2.5 py-1.5 rounded-lg hover:border-blue-500 transition shrink-0" title="Click for exact date picker">
             <span>📅</span>
             <span class="text-[11px] font-medium">Date</span>
           </button>
 
+          <!-- Sliding Bar Next to Date Icon (Auto Min/Max from Current Album) -->
+          <div id="date-range-slider-box" style="background-color: var(--bg-input); border-color: var(--border-color);" class="flex items-center gap-2 border px-2.5 py-1 rounded-lg">
+            <span id="date-slider-start-label" class="text-[10px] font-mono text-zinc-300 whitespace-nowrap">—</span>
+            <div class="dual-range-wrap" title="Slide to filter date range within current album">
+              <div class="dual-range-track"></div>
+              <div id="date-slider-fill" class="dual-range-fill" style="left: 0%; right: 0%;"></div>
+              <input id="date-slider-min" type="range" min="0" max="100" value="0" step="1"
+                     oninput="onDateSliderInput('min')" onchange="onDateSliderCommit()"
+                     class="dual-range-input" />
+              <input id="date-slider-max" type="range" min="0" max="100" value="100" step="1"
+                     oninput="onDateSliderInput('max')" onchange="onDateSliderCommit()"
+                     class="dual-range-input" />
+            </div>
+            <span id="date-slider-end-label" class="text-[10px] font-mono text-zinc-300 whitespace-nowrap">—</span>
+            <button id="btn-date-slider-reset" onclick="resetDateFilter()" title="Reset Date Range" class="hidden text-zinc-400 hover:text-red-500 font-bold text-[10px] px-0.5">✕</button>
+          </div>
+
           <!-- Floating Date Popover -->
           <div id="date-popover" style="background-color: var(--bg-panel); border-color: var(--border-color);" class="hidden absolute top-10 left-0 border rounded-xl p-3 shadow-2xl z-50 flex items-center gap-2">
-            <input id="date-from" type="date" class="bg-transparent border border-zinc-700 rounded px-2 py-1 text-[11px] focus:outline-none" onchange="applyFiltersAndPaging(0)" />
+            <input id="date-from" type="date" class="bg-transparent border border-zinc-700 rounded px-2 py-1 text-[11px] focus:outline-none" onchange="onDateInputChange()" />
             <span class="text-zinc-500">-</span>
-            <input id="date-to" type="date" class="bg-transparent border border-zinc-700 rounded px-2 py-1 text-[11px] focus:outline-none" onchange="applyFiltersAndPaging(0)" />
+            <input id="date-to" type="date" class="bg-transparent border border-zinc-700 rounded px-2 py-1 text-[11px] focus:outline-none" onchange="onDateInputChange()" />
             <button onclick="resetDateFilter()" class="text-zinc-400 hover:text-red-500 font-bold px-1">✕</button>
           </div>
         </div>
@@ -471,89 +546,103 @@
         <button onclick="closeSettingsPage()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-semibold transition text-xs shadow-md">✕ Close</button>
       </div>
 
-      <!-- ACCOUNT SECURITY SECTION -->
-      <section style="background-color: var(--bg-panel); border-color: var(--border-color);" class="p-6 rounded-2xl border space-y-4">
-        <div class="flex items-center justify-between">
+      <!-- ACCOUNT SECURITY SECTION (Auto-collapsed by default, click header to expand) -->
+      <section style="background-color: var(--bg-panel); border-color: var(--border-color);" class="p-6 rounded-2xl border">
+        <div onclick="toggleSettingsSection('security')" class="flex items-center justify-between cursor-pointer select-none group">
           <div>
-            <h3 class="text-sm font-bold flex items-center gap-2">
+            <h3 class="text-sm font-bold flex items-center gap-2 group-hover:text-blue-400 transition">
+              <span id="settings-chevron-security" class="text-zinc-400 text-xs w-3 inline-block">▸</span>
               <span>🔐</span> Account Security &amp; Credentials
             </h3>
-            <p class="text-zinc-400 text-[11px] mt-0.5">Update default administrator credentials to secure your vault access.</p>
+            <p class="text-zinc-400 text-[11px] mt-0.5 pl-5">Update administrator credentials to secure your vault access.</p>
           </div>
           <span id="security-badge" class="px-2 py-0.5 text-[10px] rounded font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30">Action Recommended</span>
         </div>
 
-        <div id="default-cred-warning" class="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3.5 text-xs text-amber-200 flex items-start gap-3">
-          <span class="text-lg">⚠️</span>
-          <div>
-            <span class="font-bold">Default demo credentials detected (demo / demo).</span>
-            <p class="text-[11px] text-amber-300/80 mt-0.5">Using default demo credentials is insecure. Please set a new unique username and a strong password.</p>
-          </div>
-        </div>
-
-        <form id="cred-form" onsubmit="event.preventDefault(); updateAccountCredentials();" class="space-y-3">
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div id="settings-sec-security" style="border-color: var(--border-color);" class="hidden pt-4 mt-4 border-t space-y-4">
+          <div id="default-cred-warning" class="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3.5 text-xs text-amber-200 flex items-start gap-3">
+            <span class="text-lg">⚠️</span>
             <div>
-              <label class="block text-zinc-400 text-[11px] mb-1 font-medium">Current Password</label>
-              <input id="cred-curr-pass" type="password" required placeholder="Enter current password (demo)" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-zinc-100" />
-            </div>
-            <div>
-              <label class="block text-zinc-400 text-[11px] mb-1 font-medium">New Username</label>
-              <input id="cred-new-user" type="text" required placeholder="New username" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-zinc-100" />
-            </div>
-          </div>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label class="block text-zinc-400 text-[11px] mb-1 font-medium">New Password</label>
-              <input id="cred-new-pass" type="password" required minlength="4" placeholder="Enter new password (min 4 chars)" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-zinc-100" />
-            </div>
-            <div>
-              <label class="block text-zinc-400 text-[11px] mb-1 font-medium">Confirm New Password</label>
-              <input id="cred-confirm-pass" type="password" required minlength="4" placeholder="Re-enter new password" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-zinc-100" />
+              <span class="font-bold">Default demo credentials detected (demo / demo).</span>
+              <p class="text-[11px] text-amber-300/80 mt-0.5">Once you set a custom account, the default demo account is permanently removed and invalidated.</p>
             </div>
           </div>
 
-          <div class="flex items-center justify-between pt-1">
-            <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg text-xs transition shadow-sm">
-              Update Credentials
-            </button>
-            <span id="cred-status-msg" class="text-xs"></span>
-          </div>
-        </form>
-      </section>
+          <form id="cred-form" onsubmit="event.preventDefault(); updateAccountCredentials();" class="space-y-3">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-zinc-400 text-[11px] mb-1 font-medium">Current Password</label>
+                <input id="cred-curr-pass" type="password" required placeholder="Enter current password" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-zinc-100" />
+              </div>
+              <div>
+                <label class="block text-zinc-400 text-[11px] mb-1 font-medium">New Username</label>
+                <input id="cred-new-user" type="text" required placeholder="New username" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-zinc-100" />
+              </div>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-zinc-400 text-[11px] mb-1 font-medium">New Password</label>
+                <input id="cred-new-pass" type="password" required minlength="4" placeholder="Enter new password (min 4 chars)" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-zinc-100" />
+              </div>
+              <div>
+                <label class="block text-zinc-400 text-[11px] mb-1 font-medium">Confirm New Password</label>
+                <input id="cred-confirm-pass" type="password" required minlength="4" placeholder="Re-enter new password" style="background-color: var(--bg-input); border-color: var(--border-color);" class="w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-zinc-100" />
+              </div>
+            </div>
 
-      <section style="background-color: var(--bg-panel); border-color: var(--border-color);" class="p-6 rounded-2xl border space-y-3">
-        <h3 class="text-sm font-bold">🌐 Local Network Access (All Interfaces)</h3>
-        <p class="text-zinc-400 text-[11px]">Access Memoria from any device on your local network using the URLs below:</p>
-        <div id="network-urls-list" class="flex flex-wrap gap-2"></div>
-      </section>
-
-      <!-- SOURCE DIRECTORIES & SMB SHARES -->
-      <section style="background-color: var(--bg-panel); border-color: var(--border-color);" class="p-6 rounded-2xl border space-y-4">
-        <div class="flex items-center justify-between">
-          <div>
-            <h3 class="text-sm font-bold">Source Directories &amp; SMB Shares</h3>
-            <p class="text-zinc-400 text-[11px] mt-0.5">Add or remove folder albums mapped to physical paths or SMB mounts.</p>
-          </div>
-          <button onclick="addNewSourceRow()" class="px-3 py-1.5 bg-blue-600/20 text-blue-400 border border-blue-500/30 hover:bg-blue-600 hover:text-white rounded-lg transition text-xs font-semibold">+ Add Path</button>
-        </div>
-        <div class="space-y-2" id="source-paths-list"></div>
-        <div class="flex items-center justify-between pt-1">
-          <button onclick="saveSourcesConfig()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg text-xs transition">Save Sources</button>
-          <span id="sources-status-msg" class="text-xs font-medium"></span>
+            <div class="flex items-center justify-between pt-1">
+              <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg text-xs transition shadow-sm">
+                Update Credentials
+              </button>
+              <span id="cred-status-msg" class="text-xs"></span>
+            </div>
+          </form>
         </div>
       </section>
 
-      <!-- RELOAD MEDIA INDEX -->
-      <section style="background-color: var(--bg-panel); border-color: var(--border-color);" class="p-6 rounded-2xl border space-y-3">
-        <div class="flex items-center justify-between">
+      <!-- SOURCE DIRECTORIES & SMB SHARES (Auto-collapsed by default, click header to expand) -->
+      <section style="background-color: var(--bg-panel); border-color: var(--border-color);" class="p-6 rounded-2xl border">
+        <div onclick="toggleSettingsSection('sources')" class="flex items-center justify-between cursor-pointer select-none group">
           <div>
-            <h3 class="text-sm font-bold">Reload Media Index</h3>
-            <p class="text-zinc-400 text-[11px] mt-0.5">Synchronize configured source folders and refresh the sidebar Album Catalog.</p>
+            <h3 class="text-sm font-bold flex items-center gap-2 group-hover:text-blue-400 transition">
+              <span id="settings-chevron-sources" class="text-zinc-400 text-xs w-3 inline-block">▸</span>
+              <span>📂</span> Source Directories &amp; SMB Shares
+            </h3>
+            <p class="text-zinc-400 text-[11px] mt-0.5 pl-5">Add or remove folder albums mapped to physical paths or encrypted SMB mounts.</p>
           </div>
-          <span id="sync-status-msg" class="text-xs font-medium"></span>
+          <span class="text-[10px] px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30">🔒 Encrypted SMB Vault</span>
         </div>
-        <button onclick="triggerDatabaseReindex()" class="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-lg text-xs transition">🔄 Reload Index &amp; Sync Database</button>
+
+        <div id="settings-sec-sources" style="border-color: var(--border-color);" class="hidden pt-4 mt-4 border-t space-y-4">
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] text-zinc-400">SMB credentials are encrypted at rest with backend Fernet keys and masked in API responses.</span>
+            <button onclick="addNewSourceRow()" class="px-3 py-1.5 bg-blue-600/20 text-blue-400 border border-blue-500/30 hover:bg-blue-600 hover:text-white rounded-lg transition text-xs font-semibold shrink-0">+ Add Path</button>
+          </div>
+          <div class="space-y-2" id="source-paths-list"></div>
+          <div class="flex items-center justify-between gap-3 pt-1">
+            <button onclick="saveSourcesConfig()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg text-xs transition shrink-0">Save Sources</button>
+            <span id="sources-status-msg" class="text-xs font-medium text-right"></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- RELOAD MEDIA INDEX (Auto-collapsed by default, click header to expand) -->
+      <section style="background-color: var(--bg-panel); border-color: var(--border-color);" class="p-6 rounded-2xl border">
+        <div onclick="toggleSettingsSection('reload')" class="flex items-center justify-between cursor-pointer select-none group">
+          <div>
+            <h3 class="text-sm font-bold flex items-center gap-2 group-hover:text-blue-400 transition">
+              <span id="settings-chevron-reload" class="text-zinc-400 text-xs w-3 inline-block">▸</span>
+              <span>🔄</span> Reload Media Index
+            </h3>
+            <p class="text-zinc-400 text-[11px] mt-0.5 pl-5">Synchronize configured source folders and refresh the sidebar Album Catalog.</p>
+          </div>
+          <span id="sync-status-msg" class="text-xs font-medium text-right max-w-md"></span>
+        </div>
+
+        <div id="settings-sec-reload" style="border-color: var(--border-color);" class="hidden pt-4 mt-4 border-t space-y-3">
+          <button onclick="triggerDatabaseReindex()" class="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-lg text-xs transition">🔄 Reload Index &amp; Sync Database</button>
+          <div id="sync-error-details" class="hidden rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-300 space-y-1"></div>
+        </div>
       </section>
     </div>
   </div>
@@ -592,6 +681,217 @@
     let isSharedReadOnlyMode = false;
     let activeShareToken = null;
 
+    // Security & Transport Encryption state
+    let authToken = sessionStorage.getItem('auth_token') || localStorage.getItem('memoria_auth_token') || '';
+    let serverTransportKey = '';
+    let isDemoActiveOnServer = true;
+
+    // Intercept all /api/... requests to attach user credentials even on local network
+    const _nativeFetch = window.fetch.bind(window);
+    window.fetch = async function(input, init = {}) {
+      const urlStr = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+      if (urlStr.startsWith('/api/')) {
+        const headers = new Headers(init.headers || {});
+        const token = authToken || sessionStorage.getItem('auth_token') || localStorage.getItem('memoria_auth_token') || '';
+        if (token) {
+          headers.set('Authorization', `Bearer ${token}`);
+          headers.set('X-Memoria-Auth', token);
+        }
+        init = Object.assign({}, init, {
+          headers,
+          credentials: 'same-origin'
+        });
+      }
+      const res = await _nativeFetch(input, init);
+      if (res.status === 401 && !isSharedReadOnlyMode && !urlStr.includes('/api/auth/login') && !urlStr.includes('/api/auth/public-status')) {
+        document.getElementById('login-modal').classList.remove('hidden');
+      }
+      return res;
+    };
+
+    function encodeTransportSecret(plain) {
+      if (!plain || plain === '••••••••') return plain || '';
+      if (!serverTransportKey) return plain;
+      try {
+        const valBytes = new TextEncoder().encode(String(plain));
+        const keyBytes = new TextEncoder().encode(serverTransportKey);
+        const out = new Uint8Array(valBytes.length);
+        for (let i = 0; i < valBytes.length; i++) {
+          out[i] = valBytes[i] ^ keyBytes[i % keyBytes.length];
+        }
+        let bin = '';
+        for (let i = 0; i < out.length; i++) bin += String.fromCharCode(out[i]);
+        return 'tr:' + btoa(bin);
+      } catch (e) {
+        return plain;
+      }
+    }
+
+    function getStreamUrl(kind, id) {
+      const base = `/api/stream/${kind}/${id}`;
+      if (isSharedReadOnlyMode && activeShareToken) {
+        return `${base}?share_token=${encodeURIComponent(activeShareToken)}`;
+      }
+      const token = authToken || sessionStorage.getItem('auth_token') || localStorage.getItem('memoria_auth_token') || '';
+      if (token) {
+        return `${base}?auth_token=${encodeURIComponent(token)}`;
+      }
+      return base;
+    }
+
+    // Album Date Range Slider state (days since epoch or day offsets)
+    let albumMinDateStr = '';
+    let albumMaxDateStr = '';
+    let albumMinDayEpoch = 0;
+    let albumMaxDayEpoch = 0;
+
+    function dateStrToDayEpoch(ymd) {
+      if (!ymd) return null;
+      const clean = String(ymd).split(' ')[0].trim();
+      const parts = clean.split('-');
+      if (parts.length !== 3) return null;
+      const ms = Date.UTC(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+      return isNaN(ms) ? null : Math.floor(ms / 86400000);
+    }
+
+    function dayEpochToDateStr(dayEpoch) {
+      const d = new Date(dayEpoch * 86400000);
+      return d.toISOString().slice(0, 10);
+    }
+
+    function updateDateSliderFillUI() {
+      const minEl = document.getElementById('date-slider-min');
+      const maxEl = document.getElementById('date-slider-max');
+      const fillEl = document.getElementById('date-slider-fill');
+      const resetBtn = document.getElementById('btn-date-slider-reset');
+      if (!minEl || !maxEl || !fillEl) return;
+
+      const minBound = parseInt(minEl.min, 10) || 0;
+      const maxBound = parseInt(minEl.max, 10) || 0;
+      const curMin = parseInt(minEl.value, 10) || 0;
+      const curMax = parseInt(maxEl.value, 10) || 0;
+      const span = Math.max(1, maxBound - minBound);
+
+      const leftPct = Math.max(0, Math.min(100, ((curMin - minBound) / span) * 100));
+      const rightPct = Math.max(0, Math.min(100, 100 - ((curMax - minBound) / span) * 100));
+      fillEl.style.left = `${leftPct}%`;
+      fillEl.style.right = `${rightPct}%`;
+
+      if (resetBtn) {
+        const isFiltered = (curMin > minBound) || (curMax < maxBound) || Boolean(document.getElementById('date-from').value) || Boolean(document.getElementById('date-to').value);
+        resetBtn.classList.toggle('hidden', !isFiltered);
+      }
+    }
+
+    function updateDateSliderBounds(minDateRaw, maxDateRaw) {
+      const minClean = (minDateRaw || '').split(' ')[0].trim();
+      const maxClean = (maxDateRaw || '').split(' ')[0].trim();
+      const minEl = document.getElementById('date-slider-min');
+      const maxEl = document.getElementById('date-slider-max');
+      const startLbl = document.getElementById('date-slider-start-label');
+      const endLbl = document.getElementById('date-slider-end-label');
+      const fromInp = document.getElementById('date-from');
+      const toInp = document.getElementById('date-to');
+      if (!minEl || !maxEl || !startLbl || !endLbl) return;
+
+      const dMin = dateStrToDayEpoch(minClean);
+      const dMax = dateStrToDayEpoch(maxClean);
+      if (dMin === null || dMax === null) {
+        startLbl.textContent = 'No dates';
+        endLbl.textContent = '';
+        minEl.min = 0; minEl.max = 0; minEl.value = 0;
+        maxEl.min = 0; maxEl.max = 0; maxEl.value = 0;
+        updateDateSliderFillUI();
+        return;
+      }
+
+      albumMinDateStr = minClean;
+      albumMaxDateStr = maxClean;
+      albumMinDayEpoch = Math.min(dMin, dMax);
+      albumMaxDayEpoch = Math.max(dMin, dMax);
+      const totalDays = Math.max(0, albumMaxDayEpoch - albumMinDayEpoch);
+
+      minEl.min = 0;
+      minEl.max = totalDays;
+      maxEl.min = 0;
+      maxEl.max = totalDays;
+
+      if (fromInp) { fromInp.min = albumMinDateStr; fromInp.max = albumMaxDateStr; }
+      if (toInp) { toInp.min = albumMinDateStr; toInp.max = albumMaxDateStr; }
+
+      const activeFrom = fromInp && fromInp.value ? dateStrToDayEpoch(fromInp.value) : null;
+      const activeTo = toInp && toInp.value ? dateStrToDayEpoch(toInp.value) : null;
+
+      const valMin = activeFrom !== null ? Math.max(0, Math.min(totalDays, activeFrom - albumMinDayEpoch)) : 0;
+      const valMax = activeTo !== null ? Math.max(0, Math.min(totalDays, activeTo - albumMinDayEpoch)) : totalDays;
+
+      minEl.value = Math.min(valMin, valMax);
+      maxEl.value = Math.max(valMin, valMax);
+
+      startLbl.textContent = dayEpochToDateStr(albumMinDayEpoch + parseInt(minEl.value, 10));
+      endLbl.textContent = dayEpochToDateStr(albumMinDayEpoch + parseInt(maxEl.value, 10));
+      updateDateSliderFillUI();
+    }
+
+    function onDateSliderInput(which) {
+      const minEl = document.getElementById('date-slider-min');
+      const maxEl = document.getElementById('date-slider-max');
+      const startLbl = document.getElementById('date-slider-start-label');
+      const endLbl = document.getElementById('date-slider-end-label');
+      if (!minEl || !maxEl || !albumMinDateStr) return;
+
+      let vMin = parseInt(minEl.value, 10) || 0;
+      let vMax = parseInt(maxEl.value, 10) || 0;
+      if (vMin > vMax) {
+        if (which === 'min') {
+          vMin = vMax;
+          minEl.value = vMin;
+        } else {
+          vMax = vMin;
+          maxEl.value = vMax;
+        }
+      }
+      const sDate = dayEpochToDateStr(albumMinDayEpoch + vMin);
+      const eDate = dayEpochToDateStr(albumMinDayEpoch + vMax);
+      if (startLbl) startLbl.textContent = sDate;
+      if (endLbl) endLbl.textContent = eDate;
+      updateDateSliderFillUI();
+    }
+
+    function onDateSliderCommit() {
+      const minEl = document.getElementById('date-slider-min');
+      const maxEl = document.getElementById('date-slider-max');
+      if (!minEl || !maxEl || !albumMinDateStr) return;
+
+      const vMin = parseInt(minEl.value, 10) || 0;
+      const vMax = parseInt(maxEl.value, 10) || 0;
+      const maxDays = parseInt(minEl.max, 10) || 0;
+
+      const sDate = dayEpochToDateStr(albumMinDayEpoch + vMin);
+      const eDate = dayEpochToDateStr(albumMinDayEpoch + vMax);
+
+      const fromInp = document.getElementById('date-from');
+      const toInp = document.getElementById('date-to');
+      if (vMin === 0 && vMax === maxDays) {
+        if (fromInp) fromInp.value = '';
+        if (toInp) toInp.value = '';
+      } else {
+        if (fromInp) fromInp.value = sDate;
+        if (toInp) toInp.value = eDate;
+      }
+      updateDateSliderFillUI();
+      applyFiltersAndPaging(0);
+    }
+
+    function onDateInputChange() {
+      const fromVal = document.getElementById('date-from').value;
+      const toVal = document.getElementById('date-to').value;
+      if (albumMinDateStr && albumMaxDateStr) {
+        updateDateSliderBounds(albumMinDateStr, albumMaxDateStr);
+      }
+      applyFiltersAndPaging(0);
+    }
+
     let sourceConfigurations = [
       { id: 1, name: "Japan Travel", path: "/media_sources/photos" }
     ];
@@ -607,18 +907,9 @@
             path: s.path_location,
             smb_username: s.smb_username || '',
             smb_password: s.smb_password || '',
+            has_password: Boolean(s.has_password),
             sync_status: s.sync_status || ''
           }));
-        }
-      } catch (e) {}
-      try {
-        const netRes = await fetch('/api/network');
-        const netData = await netRes.json();
-        const netList = document.getElementById('network-urls-list');
-        if (netList && netData.urls) {
-          netList.innerHTML = netData.urls.map(u => `
-            <a href="${u}" target="_blank" style="background-color: var(--bg-input); border-color: var(--border-color);" class="px-2.5 py-1 border rounded-lg text-xs font-mono text-blue-400 hover:border-blue-500 transition">${u}</a>
-          `).join('');
         }
       } catch (e) {}
     }
@@ -631,6 +922,9 @@
     function resetDateFilter() {
       document.getElementById('date-from').value = '';
       document.getElementById('date-to').value = '';
+      if (albumMinDateStr && albumMaxDateStr) {
+        updateDateSliderBounds(albumMinDateStr, albumMaxDateStr);
+      }
       applyFiltersAndPaging(0);
       document.getElementById('date-popover').classList.add('hidden');
     }
@@ -643,30 +937,52 @@
     async function performLogin() {
       const u = document.getElementById('login-user').value.trim();
       const p = document.getElementById('login-pass').value;
+      const errEl = document.getElementById('login-error');
       try {
         const res = await fetch('/api/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: u, password: p })
+          body: JSON.stringify({
+            username: u,
+            password: encodeTransportSecret(p)
+          })
         });
-        if (res.ok) {
-          const data = await res.json();
-          document.getElementById('login-modal').classList.add('hidden');
-          document.getElementById('login-error').classList.add('hidden');
+        const data = await res.json().catch(() => ({}));
+        const tok = data.auth_token || data.token || '';
+        if (res.ok && tok) {
+          authToken = tok;
+          if (data.transport_key) serverTransportKey = data.transport_key;
           sessionStorage.setItem('auth', 'true');
+          sessionStorage.setItem('auth_token', tok);
+          localStorage.setItem('memoria_auth_token', tok);
           sessionStorage.setItem('username', data.username || u);
+          document.getElementById('login-modal').classList.add('hidden');
+          errEl.classList.add('hidden');
           loadAlbums();
           applyFiltersAndPaging(0);
         } else {
-          document.getElementById('login-error').classList.remove('hidden');
+          errEl.textContent = data.error || 'Invalid credentials';
+          errEl.classList.remove('hidden');
         }
       } catch (err) {
-        document.getElementById('login-error').classList.remove('hidden');
+        errEl.textContent = 'Invalid credentials';
+        errEl.classList.remove('hidden');
       }
     }
 
-    function logout() {
+    async function logout() {
+      try {
+        await fetch('/api/auth/logout', { method: 'POST' });
+      } catch (e) {}
+      authToken = '';
       sessionStorage.removeItem('auth');
+      sessionStorage.removeItem('auth_token');
+      sessionStorage.removeItem('username');
+      localStorage.removeItem('memoria_auth_token');
+      if (!isDemoActiveOnServer) {
+        document.getElementById('login-user').value = '';
+        document.getElementById('login-pass').value = '';
+      }
       document.getElementById('login-modal').classList.remove('hidden');
     }
 
@@ -836,6 +1152,11 @@
       if (isSharedReadOnlyMode) return;
       currentAlbum = album;
       document.getElementById('active-album-title').innerText = album || 'All Media';
+      // Reset active date filter on album switch so the slider auto-defines min/max from the newly selected album
+      const fromInp = document.getElementById('date-from');
+      const toInp = document.getElementById('date-to');
+      if (fromInp) fromInp.value = '';
+      if (toInp) toInp.value = '';
       renderAlbumsList();
       applyFiltersAndPaging(0);
     }
@@ -864,9 +1185,11 @@
 
       try {
         const res = await fetch(url);
+        if (!res.ok) return;
         const data = await res.json();
         mediaItems = data.items || [];
         totalItems = data.total || 0;
+        updateDateSliderBounds(data.album_min_date || '', data.album_max_date || '');
         renderGrid();
         renderPagination();
         if (map) renderGlobePins();
@@ -1189,6 +1512,10 @@
             if (el) el.classList.add('hidden');
           });
 
+          const dates = mediaItems.map(m => (m.date_taken || '').split(' ')[0]).filter(Boolean).sort();
+          if (dates.length > 0) {
+            updateDateSliderBounds(dates[0], dates[dates.length - 1]);
+          }
           renderGrid();
           renderPagination();
         } else {
@@ -1208,12 +1535,13 @@
         const cardBorder = isSelected ? 'ring-2 ring-blue-500 border-blue-500' : 'hover:border-blue-500';
         const checkVisibility = (isSelectionMode || isSelected) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100';
         const checkBg = isSelected ? 'bg-blue-600 border-blue-400 text-white' : 'bg-black/60 border-white/60 text-transparent hover:border-blue-400';
+        const thumbUrl = getStreamUrl('thumb', item.id);
 
         return `
           <div style="background-color: var(--card-bg); border-color: var(--border-color);" 
                class="group relative aspect-square rounded-xl overflow-hidden border ${cardBorder} transition duration-200 cursor-pointer shadow-sm flex items-center justify-center"
                onclick="${isSelectionMode ? `togglePhotoSelect(${item.id})` : `openPhotoViewer(${idx})`}">
-            <img src="/api/stream/file/${item.id}" class="w-full h-full object-contain bg-black/30 group-hover:scale-105 transition duration-300" />
+            <img src="${thumbUrl}" loading="lazy" decoding="async" class="w-full h-full object-contain bg-black/30 group-hover:scale-105 transition duration-300" />
             ${!isSharedReadOnlyMode ? `
               <button onclick="event.stopPropagation(); togglePhotoSelect(${item.id})"
                       title="Select photo for Virtual Album / Sharing"
@@ -1401,7 +1729,8 @@
       }
       isCaptionEditMode = false;
       const pswpItems = mediaItems.map(m => ({
-        src: `/api/stream/file/${m.id}`,
+        src: getStreamUrl('file', m.id),
+        msrc: getStreamUrl('thumb', m.id),
         width: m.width || 1200,
         height: m.height || 800,
         id: m.id,
@@ -1413,10 +1742,12 @@
         exif: m.exif || {}
       }));
 
+      // preload: [1, 1] loads the clicked photo first, then buffers ONLY 1 previous and 1 next photo
       const pswp = new window.PhotoSwipe({
         dataSource: pswpItems,
         index: index,
-        bgOpacity: 0.94
+        bgOpacity: 0.94,
+        preload: [1, 1]
       });
 
       activeLightboxInstance = pswp;
@@ -1816,7 +2147,9 @@
             const p = project(Number(i.longitude), Number(i.latitude));
             if (!p) return;
             const el = document.createElement('img');
-            el.src = `/api/stream/file/${i.id}`;
+            el.src = getStreamUrl('thumb', i.id);
+            el.loading = 'lazy';
+            el.decoding = 'async';
             el.className = 'globe-marker-pin pointer-events-auto';
             el.title = `${i.album_name}${i.caption ? ' — ' + i.caption : ''}`;
             el.style.position = 'absolute';
@@ -1862,7 +2195,9 @@
       mediaItems.forEach((i, idx) => {
         if (i.latitude == null || i.longitude == null) return;
         const el = document.createElement('img');
-        el.src = `/api/stream/file/${i.id}`;
+        el.src = getStreamUrl('thumb', i.id);
+        el.loading = 'lazy';
+        el.decoding = 'async';
         el.className = 'globe-marker-pin';
         el.title = `${i.album_name}${i.caption ? ' — ' + i.caption : ''}`;
         el.addEventListener('click', (e) => {
@@ -1897,16 +2232,19 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             current_username: currUser,
-            current_password: currPass,
+            current_password: encodeTransportSecret(currPass),
             new_username: newUser,
-            new_password: newPass
+            new_password: encodeTransportSecret(newPass)
           })
         });
         const data = await res.json();
         if (res.ok) {
           statusMsg.className = "text-xs text-emerald-400 font-medium";
-          statusMsg.textContent = "✓ Credentials updated successfully!";
+          statusMsg.textContent = "✓ Credentials updated & demo account permanently removed!";
           sessionStorage.setItem("username", newUser);
+          isDemoActiveOnServer = false;
+          const demoHint = document.getElementById("demo-login-hint");
+          if (demoHint) demoHint.classList.add("hidden");
           document.getElementById("default-cred-warning").classList.add("hidden");
           const badge = document.getElementById("security-badge");
           if (badge) {
@@ -1924,14 +2262,33 @@
       }
     }
 
+    function collapseAllSettingsSections() {
+      ['security', 'sources', 'reload'].forEach(key => {
+        const body = document.getElementById(`settings-sec-${key}`);
+        const chev = document.getElementById(`settings-chevron-${key}`);
+        if (body) body.classList.add('hidden');
+        if (chev) chev.textContent = '▸';
+      });
+    }
+
+    function toggleSettingsSection(key) {
+      const body = document.getElementById(`settings-sec-${key}`);
+      const chev = document.getElementById(`settings-chevron-${key}`);
+      if (!body) return;
+      const isHidden = body.classList.contains('hidden');
+      body.classList.toggle('hidden', !isHidden);
+      if (chev) chev.textContent = isHidden ? '▾' : '▸';
+    }
+
     async function openSettingsPage() {
-      const user = sessionStorage.getItem('username') || 'demo';
-      if (user !== 'demo' && user !== 'admin') {
+      const user = sessionStorage.getItem('username') || '';
+      if (!isDemoActiveOnServer || (user && user !== 'demo' && user !== 'admin')) {
         const w = document.getElementById('default-cred-warning');
         if (w) w.classList.add('hidden');
         const b = document.getElementById('security-badge');
         if (b) { b.className = 'px-2 py-0.5 text-[10px] rounded font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'; b.textContent = 'Secured'; }
       }
+      collapseAllSettingsSections();
       await loadSourcesConfig();
       document.getElementById('settings-page').classList.remove('hidden');
       document.getElementById('settings-page').classList.add('flex');
@@ -1980,7 +2337,8 @@
                        oninput="sourceConfigurations[${idx}].smb_username = this.value"
                        style="background-color: var(--bg-panel); border-color: var(--border-color);"
                        class="border rounded-lg px-2.5 py-1 text-[11px] w-44 focus:outline-none focus:border-blue-500" />
-                <input type="password" placeholder="SMB Password" value="${(s.smb_password || '').replace(/"/g, '&quot;')}"
+                <input type="password" placeholder="SMB Password (Encrypted)" value="${(s.smb_password || '').replace(/"/g, '&quot;')}"
+                       onfocus="if(this.value==='••••••••'){this.value=''; sourceConfigurations[${idx}].smb_password='';}"
                        oninput="sourceConfigurations[${idx}].smb_password = this.value"
                        style="background-color: var(--bg-panel); border-color: var(--border-color);"
                        class="border rounded-lg px-2.5 py-1 text-[11px] w-44 focus:outline-none focus:border-blue-500" />
@@ -2005,16 +2363,17 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            id: s.id || null,
             path_location: s.path,
-            smb_username: s.smb_username || '',
-            smb_password: s.smb_password || ''
+            smb_username: encodeTransportSecret(s.smb_username || ''),
+            smb_password: encodeTransportSecret(s.smb_password || '')
           })
         });
-        const data = await res.json();
-        s.sync_status = data.message || '';
+        const data = await res.json().catch(() => ({}));
+        s.sync_status = data.message || data.error || '';
         if (stEl) {
           stEl.className = `text-[11px] font-medium ${data.ok ? 'text-emerald-400' : 'text-amber-400'}`;
-          stEl.textContent = (data.ok ? '✓ ' : '⚠️ ') + (data.message || '');
+          stEl.textContent = (data.ok ? '✓ ' : '⚠️ ') + (data.message || data.error || 'Connection test failed.');
         }
       } catch (e) {
         if (stEl) {
@@ -2069,7 +2428,7 @@
       const msg = document.getElementById('sources-status-msg');
       if (msg) {
         msg.className = 'text-xs text-blue-400 font-medium';
-        msg.textContent = '⏳ Saving & connecting sources...';
+        msg.textContent = '⏳ Encrypting credentials, saving & indexing sources...';
       }
       try {
         const res = await fetch('/api/config', {
@@ -2079,30 +2438,45 @@
             id: s.id || null,
             album_name: s.name,
             path_location: s.path,
-            smb_username: s.smb_username || '',
-            smb_password: s.smb_password || ''
+            smb_username: encodeTransportSecret(s.smb_username || ''),
+            smb_password: encodeTransportSecret(s.smb_password || '')
           })))
         });
+        const data = await res.json().catch(() => ({}));
+        await loadSourcesConfig();
+        renderSettings();
+        await loadAlbums();
+        await applyFiltersAndPaging(0);
         if (res.ok) {
-          await loadSourcesConfig();
-          renderSettings();
-          await loadAlbums();
-          await applyFiltersAndPaging(0);
-          if (msg) {
+          const errs = Array.isArray(data.errors) ? data.errors : [];
+          if (errs.length > 0) {
+            if (msg) {
+              msg.className = 'text-xs text-amber-400 font-medium';
+              msg.textContent = `⚠️ Saved with folder warning(s): ${errs.join(' | ')}`;
+            }
+          } else if (msg) {
             msg.className = 'text-xs text-emerald-400 font-medium';
-            msg.textContent = '✓ Sources saved & Album Catalog updated!';
+            msg.textContent = `✓ Sources saved & synced (${data.total_indexed ?? totalItems} items indexed)!`;
           }
+        } else if (msg) {
+          msg.className = 'text-xs text-rose-400 font-medium';
+          msg.textContent = `⚠️ ${data.error || 'Error saving sources.'}`;
         }
       } catch (e) {
         if (msg) {
           msg.className = 'text-xs text-rose-400 font-medium';
-          msg.textContent = 'Error saving sources.';
+          msg.textContent = `⚠️ Error saving sources: ${e.message || 'Network or timeout error'}`;
         }
       }
     }
 
     async function triggerDatabaseReindex() {
       const syncMsg = document.getElementById('sync-status-msg');
+      const errBox = document.getElementById('sync-error-details');
+      if (errBox) {
+        errBox.classList.add('hidden');
+        errBox.innerHTML = '';
+      }
       if (syncMsg) {
         syncMsg.className = 'text-xs text-blue-400 font-medium';
         syncMsg.textContent = '⏳ Syncing local & SMB sources and reloading index...';
@@ -2116,24 +2490,56 @@
               id: s.id || null,
               album_name: s.name,
               path_location: s.path,
-              smb_username: s.smb_username || '',
-              smb_password: s.smb_password || ''
+              smb_username: encodeTransportSecret(s.smb_username || ''),
+              smb_password: encodeTransportSecret(s.smb_password || '')
             }))
           })
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         await loadSourcesConfig();
         renderSettings();
         await loadAlbums();
         await applyFiltersAndPaging(0);
-        if (syncMsg) {
+
+        if (!res.ok) {
+          const errText = data.error || `HTTP ${res.status}: Failed to reload media index.`;
+          if (syncMsg) {
+            syncMsg.className = 'text-xs text-rose-400 font-medium';
+            syncMsg.textContent = `⚠️ ${errText}`;
+          }
+          if (errBox) {
+            errBox.innerHTML = `<div class="font-bold">⚠️ Error reloading media index:</div><div>${errText}</div>`;
+            errBox.classList.remove('hidden');
+          }
+          return;
+        }
+
+        const errs = Array.isArray(data.errors) ? data.errors : [];
+        if (errs.length > 0) {
+          if (syncMsg) {
+            syncMsg.className = 'text-xs text-amber-400 font-medium';
+            syncMsg.textContent = `⚠️ Reload finished with ${errs.length} folder error(s): ${errs[0]}`;
+          }
+          if (errBox) {
+            errBox.innerHTML = `<div class="font-bold text-amber-300">⚠️ Folder Sync Warnings / Errors (${errs.length}):</div>` +
+              errs.map(e => `<div class="pl-2">• ${e}</div>`).join('');
+            errBox.classList.remove('hidden');
+            const reloadSec = document.getElementById('settings-sec-reload');
+            if (reloadSec) reloadSec.classList.remove('hidden');
+          }
+        } else if (syncMsg) {
           syncMsg.className = 'text-xs text-emerald-400 font-medium';
-          syncMsg.textContent = `✓ Reload complete! ${allAlbums.length} album(s) active in folder list.`;
+          syncMsg.textContent = `✓ Reload complete! ${allAlbums.length} album(s) active (${data.total_indexed ?? totalItems} photos indexed).`;
         }
       } catch (e) {
+        const detail = (e && e.message) ? e.message : 'Unable to reach backend server.';
         if (syncMsg) {
           syncMsg.className = 'text-xs text-rose-400 font-medium';
-          syncMsg.textContent = 'Error reloading index.';
+          syncMsg.textContent = `⚠️ Error reloading index: ${detail}`;
+        }
+        if (errBox) {
+          errBox.innerHTML = `<div class="font-bold">⚠️ Error reloading media index:</div><div>${detail}</div>`;
+          errBox.classList.remove('hidden');
         }
       }
     }
@@ -2142,18 +2548,34 @@
     const viewParam = urlParams.get('view');
     const shareParam = urlParams.get('share');
 
-    function initFromUrl() {
+    async function initFromUrl() {
       if (shareParam) {
         initSharedAlbumGate(shareParam);
         return;
       }
-      if (sessionStorage.getItem('auth') || viewParam) {
-        if (viewParam !== 'login') {
+
+      try {
+        const stRes = await fetch('/api/auth/public-status');
+        const stData = await stRes.json().catch(() => ({}));
+        if (stData.transport_key) {
+          serverTransportKey = stData.transport_key;
+        }
+        isDemoActiveOnServer = Boolean(stData.demo_active);
+
+        if (!isDemoActiveOnServer) {
+          const demoHint = document.getElementById('demo-login-hint');
+          if (demoHint) demoHint.classList.add('hidden');
+          const uInp = document.getElementById('login-user');
+          const pInp = document.getElementById('login-pass');
+          if (uInp && uInp.value === 'demo') uInp.value = '';
+          if (pInp && pInp.value === 'demo') pInp.value = '';
+        }
+
+        if (stData.authenticated && viewParam !== 'login') {
           document.getElementById('login-modal').classList.add('hidden');
           sessionStorage.setItem('auth', 'true');
-          sessionStorage.setItem('username', 'demo');
-        }
-        loadAlbums().then(() => {
+          if (stData.username) sessionStorage.setItem('username', stData.username);
+          await loadAlbums();
           if (viewParam === 'grid' || viewParam === 'date') {
             document.getElementById('sidebar').classList.add('expanded');
           }
@@ -2164,8 +2586,7 @@
           } else if (viewParam === 'globe') {
             switchView('globe');
           }
-        });
-        applyFiltersAndPaging(0).then(() => {
+          await applyFiltersAndPaging(0);
           if (viewParam === 'lightbox') {
             openPhotoViewer(0);
             setTimeout(() => {
@@ -2173,7 +2594,11 @@
               if (p) p.style.display = 'flex';
             }, 150);
           }
-        });
+        } else {
+          document.getElementById('login-modal').classList.remove('hidden');
+        }
+      } catch (e) {
+        document.getElementById('login-modal').classList.remove('hidden');
       }
     }
 
