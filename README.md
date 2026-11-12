@@ -247,3 +247,21 @@ python3 server.py
 6. **Share Virtual Albums with Secured Link & Auto-Generated 4-Digit Passcode:**
    * Click **🔗 Share** in the top bar (or next to any album in the sidebar) to generate a secured share URL (`http://<host>:8080/?share=<token>`) and an **auto-generated 4-digit numeric passcode**.
    * Recipients opening the share URL are prompted by the Passcode Gate to enter the 4-digit passcode and gain read-only access strictly to the linked database photos.
+7. **Multi-User Isolation & Local Sharing:**
+   * Each local user has an isolated view: personal albums and sources are strictly visible to their creator by default.
+   * In **⚙️ Settings $\rightarrow$ Source Directories & SMB Shares**, check **Share with other local users** (`is_shared_local`) to permit other local accounts to browse the album.
+   * In the sidebar album catalog, toggle the **👥 Shared** filter button (next to Date) to discover albums shared by other household accounts.
+8. **Subfolder Album Auto-Mapping (with Full UTF-8 & CJK Support):**
+   * Hierarchical subfolders inside any source or SMB directory are automatically parsed into individual albums named `"[added album name]- [subfolder1]- [subfolder2]"`.
+   * Complete UTF-8 encoding ensures Chinese, Japanese, and international folder names render without character distortion.
+9. **Shared Albums Management in Settings:**
+   * Review the 20 most recent secured links under **⚙️ Settings $\rightarrow$ 🔗 Shared Albums**.
+   * View live 4-digit passcodes, copy share links with one click, or instantly revoke shared access.
+10. **Background Auto Geo-Captioning & "Tasking in Running":**
+    * Geotagged photos automatically receive human-readable location captions (`"City/Town, Country"`) via background reverse geocoding.
+    * An auto-updating **⚡ Tasking in Running** panel appears in Settings while jobs are active and automatically hides upon 100% completion.
+11. **Interactive 3D Globe with iOS-Style Photo Map Clustering:**
+    * High-speed `/api/media/globe` pre-caches GPS coordinates and EXIF metadata for instant 3D rendering.
+    * Nearby pins dynamically group into iOS-style count badges when zoomed out and split smoothly as the camera zooms in.
+    * Click any cluster to open the preview drawer or zoom directly to the location.
+

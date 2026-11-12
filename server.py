@@ -11,7 +11,10 @@ import io
 import base64
 import hashlib
 import secrets
+import time
+import math
 import urllib.parse
+import urllib.request
 from datetime import datetime
 
 try:
@@ -509,10 +512,237 @@ def extract_full_metadata(local_file_path, display_filename=None, fallback_dt=No
     return width, height, fsize, date_taken, lat, lon, grouped_exif
 
 
-def _scan_smb_recursive(unc_dir, server, results_list):
+def derive_subfolder_album_name(base_album, rel_dir):
+    """
+    Maps subfolders into separate albums named:
+    '[added album name]- [subfolder1 name]- [subfolder2 name]'
+    with full UTF-8 (Chinese / CJK / Unicode) support.
+    """
+    base = (base_album or "").strip()
+    if not rel_dir:
+        return base
+    norm = str(rel_dir).replace("\\", "/").strip("/")
+    if not norm or norm == ".":
+        return base
+    parts = [p.strip() for p in norm.split("/") if p.strip() and p.strip() not in (".", "..")]
+    if not parts:
+        return base
+    return base + "".join(f"- {p}" for p in parts)
+
+
+# Built-in high-speed offline Gazetteer for reverse geocoding (lat, lon) -> (City/Town, Country)
+OFFLINE_PLACES = [
+    # Hong Kong (18 Districts & Major Towns)
+    (22.4445, 114.0222, "Yuen Long", "Hong Kong"),
+    (22.4610, 114.0010, "Tin Shui Wai", "Hong Kong"),
+    (22.3908, 113.9725, "Tuen Mun", "Hong Kong"),
+    (22.3714, 114.1136, "Tsuen Wan", "Hong Kong"),
+    (22.3526, 114.1277, "Kwai Chung", "Hong Kong"),
+    (22.3583, 114.1069, "Tsing Yi", "Hong Kong"),
+    (22.3820, 114.1918, "Sha Tin", "Hong Kong"),
+    (22.4257, 114.2307, "Ma On Shan", "Hong Kong"),
+    (22.4508, 114.1642, "Tai Po", "Hong Kong"),
+    (22.5015, 114.1283, "Sheung Shui", "Hong Kong"),
+    (22.4926, 114.1388, "Fanling", "Hong Kong"),
+    (22.3814, 114.2705, "Sai Kung", "Hong Kong"),
+    (22.3075, 114.2598, "Tseung Kwan O", "Hong Kong"),
+    (22.3133, 114.2258, "Kwun Tong", "Hong Kong"),
+    (22.3282, 114.1915, "Kowloon City", "Hong Kong"),
+    (22.3422, 114.1932, "Wong Tai Sin", "Hong Kong"),
+    (22.3307, 114.1621, "Sham Shui Po", "Hong Kong"),
+    (22.3193, 114.1694, "Mong Kok", "Hong Kong"),
+    (22.2988, 114.1722, "Tsim Sha Tsui", "Hong Kong"),
+    (22.2819, 114.1581, "Central", "Hong Kong"),
+    (22.2797, 114.1717, "Wan Chai", "Hong Kong"),
+    (22.2804, 114.1850, "Causeway Bay", "Hong Kong"),
+    (22.2860, 114.2190, "Quarry Bay", "Hong Kong"),
+    (22.2478, 114.1558, "Aberdeen", "Hong Kong"),
+    (22.2189, 114.2119, "Stanley", "Hong Kong"),
+    (22.2889, 113.9425, "Tung Chung", "Hong Kong"),
+    (22.2669, 113.9044, "Lantau Island", "Hong Kong"),
+    (22.3130, 114.0413, "Hong Kong Disneyland", "Hong Kong"),
+    (22.2081, 114.0292, "Cheung Chau", "Hong Kong"),
+    # Mainland China, Macau & Taiwan
+    (22.5431, 114.0579, "Shenzhen", "China"),
+    (22.5533, 113.8839, "Bao'an, Shenzhen", "China"),
+    (22.7209, 113.8300, "Shajing, Shenzhen", "China"),
+    (22.5333, 113.9304, "Nanshan, Shenzhen", "China"),
+    (23.0207, 113.7518, "Dongguan", "China"),
+    (23.1291, 113.2644, "Guangzhou", "China"),
+    (22.2707, 113.5767, "Zhuhai", "China"),
+    (22.1987, 113.5439, "Macau", "Macau"),
+    (25.0330, 121.5654, "Taipei", "Taiwan"),
+    (24.1477, 120.6736, "Taichung", "Taiwan"),
+    (22.9997, 120.2270, "Tainan", "Taiwan"),
+    (22.6273, 120.3014, "Kaohsiung", "Taiwan"),
+    (23.9872, 121.6015, "Hualien", "Taiwan"),
+    (39.9042, 116.4074, "Beijing", "China"),
+    (31.2304, 121.4737, "Shanghai", "China"),
+    (30.2741, 120.1551, "Hangzhou", "China"),
+    (31.2990, 120.5853, "Suzhou", "China"),
+    (30.5728, 104.0668, "Chengdu", "China"),
+    (29.5630, 106.5516, "Chongqing", "China"),
+    (34.3416, 108.9398, "Xi'an", "China"),
+    (24.4798, 118.0894, "Xiamen", "China"),
+    (18.2528, 109.5120, "Sanya", "China"),
+    (25.2736, 110.2900, "Guilin", "China"),
+    # Japan
+    (35.6762, 139.6503, "Tokyo", "Japan"),
+    (35.6595, 139.7005, "Shibuya, Tokyo", "Japan"),
+    (35.6938, 139.7034, "Shinjuku, Tokyo", "Japan"),
+    (35.4437, 139.6380, "Yokohama", "Japan"),
+    (35.2324, 139.1069, "Hakone", "Japan"),
+    (35.4982, 138.7686, "Fujikawaguchiko", "Japan"),
+    (35.0116, 135.7681, "Kyoto", "Japan"),
+    (34.6937, 135.5023, "Osaka", "Japan"),
+    (34.6851, 135.8048, "Nara", "Japan"),
+    (34.6901, 135.1955, "Kobe", "Japan"),
+    (35.1815, 136.9066, "Nagoya", "Japan"),
+    (34.3853, 132.4553, "Hiroshima", "Japan"),
+    (33.5902, 130.4017, "Fukuoka", "Japan"),
+    (43.0618, 141.3545, "Sapporo", "Japan"),
+    (43.1907, 140.9947, "Otaru", "Japan"),
+    (26.2124, 127.6809, "Naha, Okinawa", "Japan"),
+    # South Korea & SE Asia
+    (37.5665, 126.9780, "Seoul", "South Korea"),
+    (35.1796, 129.0756, "Busan", "South Korea"),
+    (33.4996, 126.5312, "Jeju", "South Korea"),
+    (1.3521, 103.8198, "Singapore", "Singapore"),
+    (13.7563, 100.5018, "Bangkok", "Thailand"),
+    (7.8804, 98.3923, "Phuket", "Thailand"),
+    (18.7883, 98.9853, "Chiang Mai", "Thailand"),
+    (3.1390, 101.6869, "Kuala Lumpur", "Malaysia"),
+    (5.4141, 100.3288, "Penang", "Malaysia"),
+    (-8.4095, 115.1889, "Bali", "Indonesia"),
+    (-6.2088, 106.8456, "Jakarta", "Indonesia"),
+    (14.5995, 120.9842, "Manila", "Philippines"),
+    (10.8231, 106.6297, "Ho Chi Minh City", "Vietnam"),
+    (21.0285, 105.8542, "Hanoi", "Vietnam"),
+    (16.0544, 108.2022, "Da Nang", "Vietnam"),
+    # Europe
+    (48.8566, 2.3522, "Paris", "France"),
+    (43.7102, 7.2620, "Nice", "France"),
+    (51.5074, -0.1278, "London", "United Kingdom"),
+    (55.9533, -3.1883, "Edinburgh", "United Kingdom"),
+    (41.9028, 12.4964, "Rome", "Italy"),
+    (43.7696, 11.2558, "Florence", "Italy"),
+    (45.4408, 12.3155, "Venice", "Italy"),
+    (45.4642, 9.1900, "Milan", "Italy"),
+    (41.3851, 2.1734, "Barcelona", "Spain"),
+    (40.4168, -3.7038, "Madrid", "Spain"),
+    (52.5200, 13.4050, "Berlin", "Germany"),
+    (48.1351, 11.5820, "Munich", "Germany"),
+    (47.3769, 8.5417, "Zurich", "Switzerland"),
+    (46.6863, 7.8632, "Interlaken", "Switzerland"),
+    (46.5197, 8.4412, "Oberwald, Valais", "Switzerland"),
+    (46.0207, 7.7491, "Zermatt", "Switzerland"),
+    (48.2082, 16.3738, "Vienna", "Austria"),
+    (50.0878, 14.4205, "Prague", "Czechia"),
+    (52.3676, 4.9041, "Amsterdam", "Netherlands"),
+    (37.9838, 23.7275, "Athens", "Greece"),
+    (36.3932, 25.4615, "Santorini", "Greece"),
+    (38.7223, -9.1393, "Lisbon", "Portugal"),
+    # North America & Oceania
+    (37.7749, -122.4194, "San Francisco", "United States"),
+    (36.3168, -121.8885, "Big Sur, California", "United States"),
+    (34.0100, -118.4962, "Santa Monica, California", "United States"),
+    (34.0522, -118.2437, "Los Angeles", "United States"),
+    (36.1699, -115.1398, "Las Vegas", "United States"),
+    (45.4215, -121.8947, "Mount Hood, Oregon", "United States"),
+    (44.4280, -110.5885, "Yellowstone, Wyoming", "United States"),
+    (47.6062, -122.3321, "Seattle", "United States"),
+    (40.7128, -74.0060, "New York", "United States"),
+    (42.3601, -71.0589, "Boston", "United States"),
+    (41.8781, -87.6298, "Chicago", "United States"),
+    (25.7617, -80.1918, "Miami", "United States"),
+    (21.3069, -157.8583, "Honolulu", "United States"),
+    (49.2827, -123.1207, "Vancouver", "Canada"),
+    (51.1784, -115.5708, "Banff, Alberta", "Canada"),
+    (43.6532, -79.3832, "Toronto", "Canada"),
+    (-33.8688, 151.2093, "Sydney", "Australia"),
+    (-37.8136, 144.9631, "Melbourne", "Australia"),
+    (-36.8485, 174.7633, "Auckland", "New Zealand"),
+    (-45.0312, 168.6626, "Queenstown", "New Zealand"),
+]
+
+_MEM_GEOCODE_CACHE = {}
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    r = 6371.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
+
+
+def reverse_geocode_lat_lon(lat, lon, conn=None):
+    """
+    Resolves (latitude, longitude) to 'City/Town, Country'.
+    Uses in-memory + SQLite geocode_cache + built-in offline gazetteer so it runs
+    at thousands of photos per second with zero external rate limits.
+    """
+    if lat is None or lon is None:
+        return ""
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except Exception:
+        return ""
+
+    key = (round(lat_f, 2), round(lon_f, 2))
+    if key in _MEM_GEOCODE_CACHE:
+        return _MEM_GEOCODE_CACHE[key]
+
+    if conn is not None:
+        try:
+            row = conn.execute(
+                "SELECT place_label FROM geocode_cache WHERE lat_r = ? AND lon_r = ?",
+                (key[0], key[1])
+            ).fetchone()
+            if row and row["place_label"]:
+                _MEM_GEOCODE_CACHE[key] = row["place_label"]
+                return row["place_label"]
+        except Exception:
+            pass
+
+    best_dist = 1e9
+    best_city = ""
+    best_country = ""
+    for plat, plon, city, country in OFFLINE_PLACES:
+        d = _haversine_km(lat_f, lon_f, plat, plon)
+        if d < best_dist:
+            best_dist = d
+            best_city = city
+            best_country = country
+
+    if best_dist <= 180.0 and best_city and best_country:
+        label = f"{best_city}, {best_country}"
+    elif best_country and best_dist <= 650.0:
+        label = f"Near {best_city}, {best_country}"
+    else:
+        label = f"GPS {lat_f:.2f}, {lon_f:.2f}"
+
+    _MEM_GEOCODE_CACHE[key] = label
+    if conn is not None:
+        try:
+            with DB_WRITE_LOCK:
+                conn.execute(
+                    "INSERT OR REPLACE INTO geocode_cache (lat_r, lon_r, place_label) VALUES (?, ?, ?)",
+                    (key[0], key[1], label)
+                )
+        except Exception:
+            pass
+    return label
+
+
+def _scan_smb_recursive(unc_dir, unc_root, server, results_list):
     """
     Fast SMB2 directory traversal using smbclient.scandir() which reads st_mtime and st_size
     directly from the SMB2 QUERY_DIRECTORY response without per-file stat() or open_file() calls.
+    Also records relative subfolder path from unc_root for subfolder album mapping.
     """
     try:
         for entry in smbclient.scandir(unc_dir):
@@ -522,18 +752,71 @@ def _scan_smb_recursive(unc_dir, server, results_list):
             full_unc = unc_dir.rstrip("\\") + "\\" + name
             try:
                 if entry.is_dir(follow_symlinks=False):
-                    _scan_smb_recursive(full_unc, server, results_list)
+                    _scan_smb_recursive(full_unc, unc_root, server, results_list)
                 elif name.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
                     st = entry.stat(follow_symlinks=False)
                     mtime = st.st_mtime if st and st.st_mtime else None
                     fsize = st.st_size if st and st.st_size else 0
                     rel_from_host = full_unc.lstrip("\\").split("\\", 1)[1].replace("\\", "/")
                     canonical_smb_uri = f"smb://{server}/{rel_from_host}"
-                    results_list.append((canonical_smb_uri, full_unc, name, mtime, fsize))
+                    # Compute relative subfolder directory from unc_root
+                    root_prefix = unc_root.rstrip("\\")
+                    dir_curr = unc_dir.rstrip("\\")
+                    if dir_curr.lower().startswith(root_prefix.lower()):
+                        rel_dir = dir_curr[len(root_prefix):].lstrip("\\").replace("\\", "/")
+                    else:
+                        rel_dir = ""
+                    results_list.append((canonical_smb_uri, full_unc, name, mtime, fsize, rel_dir))
             except Exception:
                 continue
     except Exception:
         pass
+
+
+def remap_existing_subfolders_for_source(conn, src_id, base_album, raw_path):
+    """
+    Ensures any already-indexed media rows for src_id that reside in subfolders of raw_path
+    are mapped to '[base_album]- [subfolder1]- [subfolder2]' with full UTF-8 support.
+    """
+    if not src_id or not base_album or not raw_path:
+        return 0
+    rows = conn.execute(
+        "SELECT id, album_name, file_path FROM media WHERE source_id = ?",
+        (src_id,)
+    ).fetchall()
+    if not rows:
+        return 0
+
+    if is_smb_path(raw_path):
+        parsed = parse_smb_path(raw_path)
+        if not parsed:
+            return 0
+        server, share, subpath, _ = parsed
+        base_prefix = f"smb://{server}/{share}" + (f"/{subpath}" if subpath else "")
+        base_prefix_Slash = base_prefix.rstrip("/") + "/"
+    else:
+        resolved = resolve_source_path(raw_path) or raw_path
+        base_prefix_Slash = resolved.rstrip("/\\") + "/"
+
+    updates = []
+    for r in rows:
+        fp = (r["file_path"] or "").replace("\\", "/")
+        if fp.lower().startswith(base_prefix_Slash.lower()):
+            rel_file = fp[len(base_prefix_Slash):]
+            rel_dir = os.path.dirname(rel_file)
+            target_album = derive_subfolder_album_name(base_album, rel_dir)
+            if target_album != r["album_name"]:
+                updates.append((target_album, r["id"]))
+
+    if updates:
+        with DB_WRITE_LOCK:
+            for target_album, mid in updates:
+                try:
+                    conn.execute("UPDATE OR IGNORE media SET album_name = ? WHERE id = ?", (target_album, mid))
+                except Exception:
+                    pass
+            conn.commit()
+    return len(updates)
 
 
 def test_or_sync_smb_share(raw_path, smb_user="", smb_pass="", conn=None, src_id=None, album_name=None):
@@ -582,24 +865,41 @@ def test_or_sync_smb_share(raw_path, smb_user="", smb_pass="", conn=None, src_id
             return False, f"SMB Error ({server}): {err_str[:160]}", 0
 
         media_files = []
-        _scan_smb_recursive(unc_base, server, media_files)
+        _scan_smb_recursive(unc_base, unc_base, server, media_files)
 
     if conn is not None and src_id is not None and album_name:
-        existing_paths = {
-            r["file_path"] for r in conn.execute(
-                "SELECT file_path FROM media WHERE album_name = ?", (album_name,)
+        existing_map = {
+            r["file_path"]: (r["id"], r["album_name"])
+            for r in conn.execute(
+                "SELECT id, file_path, album_name FROM media WHERE source_id = ? OR album_name = ? OR album_name LIKE ?",
+                (src_id, album_name, f"{album_name}- %")
             ).fetchall()
         }
         batch_rows = []
-        for smb_uri, full_unc, fname, mtime, fsize in media_files:
-            if smb_uri in existing_paths:
+        remap_rows = []
+        for item_tuple in media_files:
+            smb_uri, full_unc, fname, mtime, fsize, rel_dir = item_tuple
+            target_album = derive_subfolder_album_name(album_name, rel_dir)
+            if smb_uri in existing_map:
+                mid, old_alb = existing_map[smb_uri]
+                if old_alb != target_album:
+                    remap_rows.append((target_album, src_id, mid))
                 continue
             dt_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S") if mtime else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             # Create initial lightweight EXIF summary from SMB directory entry metadata (zero file download during sync!)
             _, _, _, _, _, _, init_exif = extract_full_metadata(
                 None, display_filename=fname, fallback_dt=dt_str, fallback_size=fsize
             )
-            batch_rows.append((src_id, album_name, smb_uri, "image", dt_str, None, None, "", 0, 0, json.dumps(init_exif)))
+            batch_rows.append((src_id, target_album, smb_uri, "image", dt_str, None, None, "", 0, 0, json.dumps(init_exif, ensure_ascii=False)))
+
+        if remap_rows:
+            with DB_WRITE_LOCK:
+                for t_alb, s_id, mid in remap_rows:
+                    try:
+                        conn.execute("UPDATE OR IGNORE media SET album_name = ?, source_id = ? WHERE id = ?", (t_alb, s_id, mid))
+                    except Exception:
+                        pass
+                conn.commit()
 
         if batch_rows:
             with DB_WRITE_LOCK:
@@ -669,7 +969,7 @@ def fetch_smb_bytes(media_id, smb_uri, conn):
 def get_or_create_thumbnail(media_id, row, conn):
     """
     Returns path to a fast low-resolution thumbnail (~15-25 KB, 360x360 max) in THUMB_CACHE_DIR.
-    Also lazily updates true width, height, and full EXIF in SQLite on first access!
+    Also lazily updates true width, height, full EXIF, and auto geo-caption in SQLite on first access!
     """
     os.makedirs(THUMB_CACHE_DIR, exist_ok=True)
     thumb_path = os.path.join(THUMB_CACHE_DIR, f"thumb_{media_id}.jpg")
@@ -682,7 +982,6 @@ def get_or_create_thumbnail(media_id, row, conn):
     local_source = None
 
     if is_smb_path(fpath):
-        # Check if full file is already in SMB_CACHE_DIR
         ext = os.path.splitext(fpath)[1].lower() or ".jpg"
         url_hash = hashlib.sha1(fpath.encode("utf-8")).hexdigest()[:12]
         for cand in (
@@ -713,7 +1012,6 @@ def get_or_create_thumbnail(media_id, row, conn):
         img_stream = io.BytesIO(raw_bytes) if raw_bytes else open(local_source, "rb")
         with img_stream:
             with Image.open(img_stream) as img:
-                # Extract metadata if width/height not yet populated in SQLite
                 if not row["width"] or not row["height"]:
                     temp_meta_path = local_source
                     if not temp_meta_path and raw_bytes:
@@ -735,17 +1033,26 @@ def get_or_create_thumbnail(media_id, row, conn):
                         except Exception:
                             pass
                     if w and h:
+                        auto_cap = ""
+                        if lat is not None and lon is not None:
+                            auto_cap = reverse_geocode_lat_lon(lat, lon, conn)
                         with DB_WRITE_LOCK:
                             try:
                                 conn.execute(
-                                    "UPDATE media SET width = ?, height = ?, latitude = COALESCE(latitude, ?), longitude = COALESCE(longitude, ?), exif_json = ? WHERE id = ?",
-                                    (w, h, lat, lon, json.dumps(exif_dict), media_id)
+                                    """UPDATE media
+                                       SET width = ?,
+                                           height = ?,
+                                           latitude = COALESCE(latitude, ?),
+                                           longitude = COALESCE(longitude, ?),
+                                           caption = CASE WHEN (caption IS NULL OR TRIM(caption) = '') AND ? != '' THEN ? ELSE caption END,
+                                           exif_json = ?
+                                       WHERE id = ?""",
+                                    (w, h, lat, lon, auto_cap, auto_cap, json.dumps(exif_dict, ensure_ascii=False), media_id)
                                 )
                                 conn.commit()
                             except Exception:
                                 pass
 
-                # Transpose according to EXIF orientation before generating thumbnail
                 try:
                     img = ImageOps.exif_transpose(img)
                 except Exception:
@@ -780,7 +1087,6 @@ def fetch_smb_file_cached(media_id, row, conn):
         try:
             with open(cache_file, "wb") as wf:
                 wf.write(data)
-            # Ensure full EXIF and dimensions are updated in SQLite if not yet done
             if not row["width"] or not row["height"]:
                 fname = os.path.basename(smb_uri.replace("\\", "/"))
                 w, h, _, dt_str, lat, lon, exif_dict = extract_full_metadata(
@@ -792,11 +1098,21 @@ def fetch_smb_file_cached(media_id, row, conn):
                     fallback_size=len(data)
                 )
                 if w and h:
+                    auto_cap = ""
+                    if lat is not None and lon is not None:
+                        auto_cap = reverse_geocode_lat_lon(lat, lon, conn)
                     with DB_WRITE_LOCK:
                         try:
                             conn.execute(
-                                "UPDATE media SET width = ?, height = ?, latitude = COALESCE(latitude, ?), longitude = COALESCE(longitude, ?), exif_json = ? WHERE id = ?",
-                                (w, h, lat, lon, json.dumps(exif_dict), media_id)
+                                """UPDATE media
+                                   SET width = ?,
+                                       height = ?,
+                                       latitude = COALESCE(latitude, ?),
+                                       longitude = COALESCE(longitude, ?),
+                                       caption = CASE WHEN (caption IS NULL OR TRIM(caption) = '') AND ? != '' THEN ? ELSE caption END,
+                                       exif_json = ?
+                                   WHERE id = ?""",
+                                (w, h, lat, lon, auto_cap, auto_cap, json.dumps(exif_dict, ensure_ascii=False), media_id)
                             )
                             conn.commit()
                         except Exception:
@@ -812,6 +1128,184 @@ def get_db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 60000;")
     return conn
+
+
+# ==============================================================================
+# BACKGROUND TASK MANAGER (New 4: Auto Geo-Captioning & "Tasking in Running")
+# ==============================================================================
+BACKGROUND_TASKS_LOCK = threading.Lock()
+BACKGROUND_TASKS = {
+    "auto_geo_caption": {
+        "id": "auto_geo_caption",
+        "name": "Auto Geo-Captioning (City/Town + Country)",
+        "running": False,
+        "processed": 0,
+        "updated": 0,
+        "total": 0,
+        "percent": 0,
+        "message": "Idle",
+        "started_at": "",
+        "finished_at": ""
+    }
+}
+
+
+def _update_task_state(task_id, **kwargs):
+    with BACKGROUND_TASKS_LOCK:
+        if task_id in BACKGROUND_TASKS:
+            BACKGROUND_TASKS[task_id].update(kwargs)
+
+
+def get_tasks_status_snapshot():
+    with BACKGROUND_TASKS_LOCK:
+        all_tasks = [dict(v) for v in BACKGROUND_TASKS.values()]
+        running_tasks = [t for t in all_tasks if t.get("running")]
+        return {
+            "has_running": len(running_tasks) > 0,
+            "running_tasks": running_tasks,
+            "all_tasks": all_tasks
+        }
+
+
+def _auto_geo_caption_worker(force_recheck=False):
+    task_id = "auto_geo_caption"
+    try:
+        conn = get_db()
+        # Step 1: Check any cached SMB files in SMB_CACHE_DIR that don't have latitude/longitude yet in SQLite
+        missing_gps_rows = conn.execute(
+            "SELECT id, file_path, date_taken, width, height FROM media WHERE latitude IS NULL OR longitude IS NULL"
+        ).fetchall()
+
+        cached_candidates = []
+        for r in missing_gps_rows:
+            fp = r["file_path"] or ""
+            if is_smb_path(fp):
+                ext = os.path.splitext(fp)[1].lower() or ".jpg"
+                url_hash = hashlib.sha1(fp.encode("utf-8")).hexdigest()[:12]
+                for cand in (
+                    os.path.join(SMB_CACHE_DIR, f"media_{r['id']}_{url_hash}{ext}"),
+                    os.path.join(SMB_CACHE_DIR, f"smb_{url_hash}{ext}")
+                ):
+                    if os.path.exists(cand) and os.path.getsize(cand) > 0:
+                        cached_candidates.append((r, cand))
+                        break
+            else:
+                local_p = fp if os.path.exists(fp) else resolve_source_path(fp)
+                if local_p and os.path.exists(local_p):
+                    cached_candidates.append((r, local_p))
+
+        # Step 2: Query all geotagged photos for City/Town + Country captioning
+        geo_rows = conn.execute(
+            "SELECT id, latitude, longitude, caption, exif_json FROM media WHERE latitude IS NOT NULL AND longitude IS NOT NULL"
+        ).fetchall()
+
+        total_work = len(geo_rows)
+        _update_task_state(
+            task_id,
+            running=True,
+            processed=0,
+            updated=0,
+            total=max(total_work, 1),
+            percent=2,
+            message=f"Scanning {total_work} geotagged photos for City/Town + Country captions...",
+            started_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+
+        # Process any newly cached files first to extract GPS if present
+        for r, local_p in cached_candidates:
+            try:
+                fname = os.path.basename((r["file_path"] or "").replace("\\", "/"))
+                w, h, _, dt_str, lat, lon, exif_dict = extract_full_metadata(
+                    local_p, display_filename=fname, fallback_dt=r["date_taken"]
+                )
+                if lat is not None and lon is not None:
+                    with DB_WRITE_LOCK:
+                        conn.execute(
+                            "UPDATE media SET latitude = ?, longitude = ?, width = COALESCE(NULLIF(width, 0), ?), height = COALESCE(NULLIF(height, 0), ?), exif_json = ? WHERE id = ?",
+                            (lat, lon, w, h, json.dumps(exif_dict, ensure_ascii=False), r["id"])
+                        )
+                        conn.commit()
+            except Exception:
+                pass
+
+        # Re-fetch all geotagged media rows
+        geo_rows = conn.execute(
+            "SELECT id, latitude, longitude, caption, exif_json FROM media WHERE latitude IS NOT NULL AND longitude IS NOT NULL"
+        ).fetchall()
+        total_work = len(geo_rows)
+        _update_task_state(task_id, total=max(total_work, 1))
+
+        updated_count = 0
+        batch_updates = []
+
+        for idx, r in enumerate(geo_rows, start=1):
+            lat = r["latitude"]
+            lon = r["longitude"]
+            place_label = reverse_geocode_lat_lon(lat, lon, conn)
+            if place_label:
+                curr_cap = (r["caption"] or "").strip()
+                # Populate caption if empty, or if force_recheck and place_label not in caption
+                new_cap = curr_cap
+                if not curr_cap:
+                    new_cap = place_label
+                elif force_recheck and place_label.lower() not in curr_cap.lower():
+                    # If caption is just a generic placeholder or user asked to refresh geo captions
+                    new_cap = f"{curr_cap} — 📍 {place_label}"
+
+                if new_cap != curr_cap:
+                    batch_updates.append((new_cap, r["id"]))
+                    updated_count += 1
+
+            if len(batch_updates) >= 120 or idx == total_work:
+                if batch_updates:
+                    with DB_WRITE_LOCK:
+                        conn.executemany("UPDATE media SET caption = ? WHERE id = ?", batch_updates)
+                        conn.commit()
+                    batch_updates = []
+
+                pct = int(round((idx / max(total_work, 1)) * 100))
+                _update_task_state(
+                    task_id,
+                    processed=idx,
+                    updated=updated_count,
+                    total=total_work,
+                    percent=pct,
+                    message=f"Auto-captioned {updated_count} / {total_work} geotagged photos ({place_label or ' resolved'})..."
+                )
+                if total_work > 100 and idx < total_work:
+                    time.sleep(0.08)
+
+        conn.close()
+        # Keep brief completion visibility if triggered manually, then mark running=False so UI auto-hides
+        _update_task_state(
+            task_id,
+            running=False,
+            processed=total_work,
+            updated=updated_count,
+            total=total_work,
+            percent=100,
+            message=f"Completed: {updated_count} photos captioned with City/Town & Country ({total_work} GPS photos verified).",
+            finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+    except Exception as e:
+        _update_task_state(
+            task_id,
+            running=False,
+            message=f"Error in Auto Geo-Caption task: {str(e)}",
+            finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+
+
+def trigger_auto_geo_caption_task(force_recheck=False):
+    with BACKGROUND_TASKS_LOCK:
+        if BACKGROUND_TASKS["auto_geo_caption"]["running"]:
+            return False
+        BACKGROUND_TASKS["auto_geo_caption"]["running"] = True
+        BACKGROUND_TASKS["auto_geo_caption"]["percent"] = 1
+        BACKGROUND_TASKS["auto_geo_caption"]["message"] = "Starting background geo-captioning task..."
+    t = threading.Thread(target=_auto_geo_caption_worker, args=(force_recheck,), daemon=True)
+    t.start()
+    return True
 
 
 def backfill_local_media_exif(conn):
@@ -859,7 +1353,7 @@ def backfill_local_media_exif(conn):
 
         conn.execute(
             "UPDATE media SET width = ?, height = ?, exif_json = ? WHERE id = ?",
-            (w or 1200, h or 800, json.dumps(exif_dict), r["id"])
+            (w or 1200, h or 800, json.dumps(exif_dict, ensure_ascii=False), r["id"])
         )
         updated = True
 
@@ -890,6 +1384,14 @@ def init_db():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS geocode_cache (
+            lat_r REAL NOT NULL,
+            lon_r REAL NOT NULL,
+            place_label TEXT NOT NULL,
+            PRIMARY KEY (lat_r, lon_r)
+        );
+    """)
 
     src_schema = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='sources_config'").fetchone()
     if src_schema and "path_location TEXT NOT NULL UNIQUE" in (src_schema[0] or ""):
@@ -903,7 +1405,9 @@ def init_db():
                 last_synced DATETIME,
                 smb_username TEXT DEFAULT '',
                 smb_password TEXT DEFAULT '',
-                sync_status TEXT DEFAULT ''
+                sync_status TEXT DEFAULT '',
+                owner_username TEXT DEFAULT '',
+                is_shared_local INTEGER DEFAULT 0
             );
         """)
         c.execute("""
@@ -921,7 +1425,9 @@ def init_db():
                 last_synced DATETIME,
                 smb_username TEXT DEFAULT '',
                 smb_password TEXT DEFAULT '',
-                sync_status TEXT DEFAULT ''
+                sync_status TEXT DEFAULT '',
+                owner_username TEXT DEFAULT '',
+                is_shared_local INTEGER DEFAULT 0
             );
         """)
 
@@ -932,6 +1438,10 @@ def init_db():
         c.execute("ALTER TABLE sources_config ADD COLUMN smb_password TEXT DEFAULT '';")
     if "sync_status" not in existing_cols:
         c.execute("ALTER TABLE sources_config ADD COLUMN sync_status TEXT DEFAULT '';")
+    if "owner_username" not in existing_cols:
+        c.execute("ALTER TABLE sources_config ADD COLUMN owner_username TEXT DEFAULT '';")
+    if "is_shared_local" not in existing_cols:
+        c.execute("ALTER TABLE sources_config ADD COLUMN is_shared_local INTEGER DEFAULT 0;")
 
     # Encrypt any existing plaintext SMB credentials at rest in sources_config
     for r in c.execute("SELECT id, smb_username, smb_password FROM sources_config").fetchall():
@@ -1002,9 +1512,17 @@ def init_db():
         CREATE TABLE IF NOT EXISTS virtual_albums (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             album_name TEXT NOT NULL UNIQUE,
+            owner_username TEXT DEFAULT '',
+            is_shared_local INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
     """)
+    va_cols = {r[1] for r in c.execute("PRAGMA table_info(virtual_albums)").fetchall()}
+    if "owner_username" not in va_cols:
+        c.execute("ALTER TABLE virtual_albums ADD COLUMN owner_username TEXT DEFAULT '';")
+    if "is_shared_local" not in va_cols:
+        c.execute("ALTER TABLE virtual_albums ADD COLUMN is_shared_local INTEGER DEFAULT 0;")
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS virtual_album_items (
             album_name TEXT NOT NULL,
@@ -1020,12 +1538,17 @@ def init_db():
             passcode TEXT NOT NULL,
             album_name TEXT NOT NULL,
             media_ids TEXT NOT NULL,
+            owner_username TEXT DEFAULT '',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
     """)
+    sh_cols = {r[1] for r in c.execute("PRAGMA table_info(sharing_albums)").fetchall()}
+    if "owner_username" not in sh_cols:
+        c.execute("ALTER TABLE sharing_albums ADD COLUMN owner_username TEXT DEFAULT '';")
 
     c.execute("CREATE INDEX IF NOT EXISTS idx_media_date ON media(date_taken);")
     c.execute("CREATE INDEX IF NOT EXISTS idx_media_album ON media(album_name);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_media_source ON media(source_id);")
 
     # FIX 1: Remove/invalidate 'demo' and 'admin' accounts if ANY custom user account exists!
     c.execute("DELETE FROM users WHERE username = 'admin'")
@@ -1035,6 +1558,13 @@ def init_db():
         c.execute("DELETE FROM user_sessions WHERE LOWER(username) IN ('demo', 'admin')")
     else:
         c.execute("INSERT OR IGNORE INTO users (username, password_hash) VALUES (?, ?)", ("demo", "demo"))
+
+    # Determine primary user for backfilling legacy unowned sources/albums
+    primary_row = c.execute("SELECT username FROM users ORDER BY id ASC LIMIT 1").fetchone()
+    primary_user = primary_row["username"] if primary_row else "demo"
+    c.execute("UPDATE sources_config SET owner_username = ? WHERE owner_username IS NULL OR TRIM(owner_username) = '' OR LOWER(owner_username) IN ('demo', 'admin')", (primary_user,))
+    c.execute("UPDATE virtual_albums SET owner_username = ? WHERE owner_username IS NULL OR TRIM(owner_username) = '' OR LOWER(owner_username) IN ('demo', 'admin')", (primary_user,))
+    c.execute("UPDATE sharing_albums SET owner_username = ? WHERE owner_username IS NULL OR TRIM(owner_username) = '' OR LOWER(owner_username) IN ('demo', 'admin')", (primary_user,))
 
     # Load active sessions into memory
     for srow in c.execute("SELECT token, username FROM user_sessions").fetchall():
@@ -1051,7 +1581,10 @@ def init_db():
             ("Travel to Japan 2025", os.path.join(SOURCES_DIR, "japan"), "tokyo,shibuya,temple,garden")
         ]
         for album, path, tags in default_sources:
-            c.execute("INSERT INTO sources_config (album_name, path_location, tags, last_synced, sync_status) VALUES (?, ?, ?, datetime('now'), 'OK (Local Directory)')", (album, path, tags))
+            c.execute(
+                "INSERT INTO sources_config (album_name, path_location, tags, last_synced, sync_status, owner_username, is_shared_local) VALUES (?, ?, ?, datetime('now'), 'OK (Local Directory)', ?, 1)",
+                (album, path, tags, primary_user)
+            )
 
     if existing_media == 0:
         src_map = {r["album_name"]: r["id"] for r in c.execute("SELECT id, album_name FROM sources_config").fetchall()}
@@ -1077,16 +1610,34 @@ def init_db():
             """, (src_map.get(album), album, abs_path, "image", dt, lat, lon, caption))
 
     conn.commit()
+
+    # Remap any existing subfolder items for all configured sources
+    for srow in c.execute("SELECT id, album_name, path_location FROM sources_config").fetchall():
+        remap_existing_subfolders_for_source(conn, srow["id"], srow["album_name"], srow["path_location"])
+
     backfill_local_media_exif(conn)
     conn.close()
 
+    # Start background Auto Geo-Caption task on startup so any uncaptioned GPS photos get "City/Town, Country"
+    trigger_auto_geo_caption_task(force_recheck=False)
 
-def sync_all_sources(conn):
+
+def sync_all_sources(conn, owner_filter=None):
     """
-    Synchronizes all configured sources and returns (added_count, errors_list, source_statuses).
+    Synchronizes configured sources and returns (added_count, errors_list, source_statuses).
+    Maps subfolders as '[added album name]- [subfolder1 name]- [subfolder2 name]' with UTF-8 support.
     """
     with SYNC_LOCK:
-        sources = conn.execute("SELECT id, album_name, path_location, smb_username, smb_password FROM sources_config").fetchall()
+        if owner_filter:
+            sources = conn.execute(
+                "SELECT id, album_name, path_location, smb_username, smb_password, owner_username, is_shared_local FROM sources_config WHERE owner_username = ? OR owner_username = ''",
+                (owner_filter,)
+            ).fetchall()
+        else:
+            sources = conn.execute(
+                "SELECT id, album_name, path_location, smb_username, smb_password, owner_username, is_shared_local FROM sources_config"
+            ).fetchall()
+
         added_count = 0
         errors_list = []
         source_statuses = []
@@ -1118,13 +1669,21 @@ def sync_all_sources(conn):
                 resolved_p = resolve_source_path(raw_p)
                 if resolved_p and os.path.exists(resolved_p):
                     file_total = 0
+                    base_root = resolved_p.rstrip("/\\")
                     for root, _, files in os.walk(resolved_p):
+                        rel_dir = os.path.relpath(root, base_root)
+                        if rel_dir in (".", ""):
+                            rel_dir = ""
+                        target_album = derive_subfolder_album_name(album_name, rel_dir)
+
                         for f in sorted(files):
+                            if f.startswith("._") or f == "@eaDir":
+                                continue
                             if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
                                 file_total += 1
                                 full_p = os.path.join(root, f)
                                 existing_meta = conn.execute(
-                                    "SELECT date_taken, latitude, longitude, caption, width, height, exif_json FROM media WHERE file_path = ? LIMIT 1",
+                                    "SELECT id, album_name, date_taken, latitude, longitude, caption, width, height, exif_json FROM media WHERE file_path = ? LIMIT 1",
                                     (full_p,)
                                 ).fetchone()
                                 if existing_meta and existing_meta["width"] and existing_meta["exif_json"]:
@@ -1135,6 +1694,12 @@ def sync_all_sources(conn):
                                     w = existing_meta["width"]
                                     h = existing_meta["height"]
                                     ex_json = existing_meta["exif_json"]
+                                    if existing_meta["album_name"] != target_album:
+                                        with DB_WRITE_LOCK:
+                                            conn.execute(
+                                                "UPDATE OR IGNORE media SET album_name = ?, source_id = ? WHERE id = ?",
+                                                (target_album, src["id"], existing_meta["id"])
+                                            )
                                 else:
                                     fallback_dt = existing_meta["date_taken"] if existing_meta and existing_meta["date_taken"] else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                     fallback_lat = existing_meta["latitude"] if existing_meta else None
@@ -1143,13 +1708,15 @@ def sync_all_sources(conn):
                                     w, h, _, dt, lat, lon, exif_dict = extract_full_metadata(
                                         full_p, display_filename=f, fallback_dt=fallback_dt, fallback_lat=fallback_lat, fallback_lon=fallback_lon
                                     )
-                                    ex_json = json.dumps(exif_dict)
+                                    if not cap and lat is not None and lon is not None:
+                                        cap = reverse_geocode_lat_lon(lat, lon, conn)
+                                    ex_json = json.dumps(exif_dict, ensure_ascii=False)
 
                                 with DB_WRITE_LOCK:
                                     cur = conn.execute("""
                                         INSERT OR IGNORE INTO media (source_id, album_name, file_path, file_type, date_taken, latitude, longitude, caption, width, height, exif_json)
                                         VALUES (?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?)
-                                    """, (src["id"], album_name, full_p, dt, lat, lon, cap, w, h, ex_json))
+                                    """, (src["id"], target_album, full_p, dt, lat, lon, cap, w, h, ex_json))
                                     if cur.rowcount > 0:
                                         added_count += 1
                     status_msg = f"OK ({file_total} local files indexed)"
@@ -1172,16 +1739,81 @@ def sync_all_sources(conn):
                     errors_list.append({"album_name": album_name, "path": raw_p, "error": err_msg})
 
         backfill_local_media_exif(conn)
+        trigger_auto_geo_caption_task(force_recheck=False)
         return added_count, errors_list, source_statuses
 
 
-def get_all_albums_summary(conn):
+def get_visibility_context(conn, current_user=None, include_shared=False):
+    """
+    Returns (visible_source_ids, source_meta_by_id, visible_virtual_albums_map)
+    for per-user visibility and optional local-user shared albums.
+    """
+    if not current_user or str(current_user).startswith("share:"):
+        src_rows = conn.execute(
+            "SELECT id, album_name, path_location, last_synced, sync_status, owner_username, is_shared_local FROM sources_config ORDER BY album_name ASC"
+        ).fetchall()
+        va_rows = conn.execute(
+            "SELECT id, album_name, owner_username, is_shared_local, created_at FROM virtual_albums ORDER BY album_name ASC"
+        ).fetchall()
+    elif include_shared:
+        src_rows = conn.execute(
+            "SELECT id, album_name, path_location, last_synced, sync_status, owner_username, is_shared_local FROM sources_config WHERE owner_username = ? OR owner_username = '' OR is_shared_local = 1 ORDER BY album_name ASC",
+            (current_user,)
+        ).fetchall()
+        va_rows = conn.execute(
+            "SELECT id, album_name, owner_username, is_shared_local, created_at FROM virtual_albums WHERE owner_username = ? OR owner_username = '' OR is_shared_local = 1 ORDER BY album_name ASC",
+            (current_user,)
+        ).fetchall()
+    else:
+        src_rows = conn.execute(
+            "SELECT id, album_name, path_location, last_synced, sync_status, owner_username, is_shared_local FROM sources_config WHERE owner_username = ? OR owner_username = '' ORDER BY album_name ASC",
+            (current_user,)
+        ).fetchall()
+        va_rows = conn.execute(
+            "SELECT id, album_name, owner_username, is_shared_local, created_at FROM virtual_albums WHERE owner_username = ? OR owner_username = '' ORDER BY album_name ASC",
+            (current_user,)
+        ).fetchall()
+
+    source_meta_by_id = {r["id"]: r for r in src_rows}
+    visible_source_ids = list(source_meta_by_id.keys())
+    visible_virtual_albums_map = {r["album_name"]: r for r in va_rows}
+    return visible_source_ids, source_meta_by_id, visible_virtual_albums_map
+
+
+def build_user_visibility_sql(conn, current_user, include_shared=False):
+    """
+    Returns (sql_clause, sql_params) restricting media rows to those visible to current_user.
+    """
+    visible_source_ids, _, visible_va_map = get_visibility_context(conn, current_user, include_shared)
+    clauses = []
+    params = []
+
+    if visible_source_ids:
+        placeholders = ",".join(["?"] * len(visible_source_ids))
+        clauses.append(f"source_id IN ({placeholders})")
+        params.extend(visible_source_ids)
+
+    if visible_va_map:
+        va_names = list(visible_va_map.keys())
+        va_placeholders = ",".join(["?"] * len(va_names))
+        clauses.append(f"id IN (SELECT media_id FROM virtual_album_items WHERE album_name IN ({va_placeholders}))")
+        params.extend(va_names)
+
+    if not clauses:
+        return "1=0", []
+
+    return "(" + " OR ".join(clauses) + ")", params
+
+
+def get_all_albums_summary(conn, current_user=None, include_shared=False):
+    visible_source_ids, source_meta_by_id, visible_va_map = get_visibility_context(conn, current_user, include_shared)
     album_dict = {}
 
-    for r in conn.execute("SELECT id, album_name, path_location, last_synced, sync_status FROM sources_config ORDER BY album_name ASC").fetchall():
+    for src_id, r in source_meta_by_id.items():
         name = (r["album_name"] or "").strip()
         if not name:
             continue
+        owner = r["owner_username"] or ""
         album_dict[name] = {
             "album_name": name,
             "min_date": "",
@@ -1190,13 +1822,17 @@ def get_all_albums_summary(conn):
             "is_virtual": False,
             "is_smb": is_smb_path(r["path_location"]),
             "sync_status": r["sync_status"] or "",
-            "source_id": r["id"]
+            "source_id": r["id"],
+            "owner_username": owner,
+            "is_shared_local": bool(r["is_shared_local"]),
+            "is_shared_from_other": bool(current_user and owner and owner != current_user)
         }
 
-    for r in conn.execute("SELECT id, album_name, created_at FROM virtual_albums ORDER BY album_name ASC").fetchall():
-        name = (r["album_name"] or "").strip()
+    for name, r in visible_va_map.items():
+        name = (name or "").strip()
         if not name:
             continue
+        owner = r["owner_username"] or ""
         if name not in album_dict:
             album_dict[name] = {
                 "album_name": name,
@@ -1206,68 +1842,72 @@ def get_all_albums_summary(conn):
                 "is_virtual": True,
                 "is_smb": False,
                 "sync_status": "Virtual Album",
-                "source_id": None
+                "source_id": None,
+                "owner_username": owner,
+                "is_shared_local": bool(r["is_shared_local"]),
+                "is_shared_from_other": bool(current_user and owner and owner != current_user)
             }
         else:
             album_dict[name]["is_virtual"] = True
 
-    media_rows = conn.execute("""
-        SELECT album_name, MIN(date_taken) AS min_date, MAX(date_taken) AS max_date, COUNT(*) AS item_count
-        FROM media
-        WHERE album_name IS NOT NULL AND TRIM(album_name) != ''
-        GROUP BY album_name
-    """).fetchall()
-    for r in media_rows:
-        name = r["album_name"].strip()
-        if name not in album_dict:
-            album_dict[name] = {
-                "album_name": name,
-                "min_date": r["min_date"] or "",
-                "max_date": r["max_date"] or "",
-                "count": r["item_count"] or 0,
-                "is_virtual": False,
-                "is_smb": False,
-                "sync_status": "",
-                "source_id": None
-            }
-        else:
-            album_dict[name]["min_date"] = r["min_date"] or album_dict[name]["min_date"]
-            album_dict[name]["max_date"] = r["max_date"] or album_dict[name]["max_date"]
-            album_dict[name]["count"] = r["item_count"] or 0
+    if visible_source_ids:
+        placeholders = ",".join(["?"] * len(visible_source_ids))
+        media_rows = conn.execute(f"""
+            SELECT album_name, source_id, MIN(date_taken) AS min_date, MAX(date_taken) AS max_date, COUNT(*) AS item_count
+            FROM media
+            WHERE album_name IS NOT NULL AND TRIM(album_name) != '' AND source_id IN ({placeholders})
+            GROUP BY album_name, source_id
+        """, visible_source_ids).fetchall()
 
-    virt_rows = conn.execute("""
-        SELECT vai.album_name,
-               MIN(m.date_taken) AS min_date,
-               MAX(m.date_taken) AS max_date,
-               COUNT(DISTINCT m.id) AS item_count
-        FROM virtual_album_items vai
-        JOIN media m ON m.id = vai.media_id
-        GROUP BY vai.album_name
-    """).fetchall()
-    for r in virt_rows:
-        name = r["album_name"].strip()
-        if name not in album_dict:
-            album_dict[name] = {
-                "album_name": name,
-                "min_date": r["min_date"] or "",
-                "max_date": r["max_date"] or "",
-                "count": r["item_count"] or 0,
-                "is_virtual": True,
-                "is_smb": False,
-                "sync_status": "Virtual Album",
-                "source_id": None
-            }
-        else:
-            total_distinct = conn.execute("""
-                SELECT COUNT(DISTINCT id), MIN(date_taken), MAX(date_taken)
-                FROM media
-                WHERE album_name = ? OR id IN (SELECT media_id FROM virtual_album_items WHERE album_name = ?)
-            """, (name, name)).fetchone()
-            album_dict[name]["count"] = total_distinct[0] or 0
-            if total_distinct[1]:
-                album_dict[name]["min_date"] = total_distinct[1]
-            if total_distinct[2]:
-                album_dict[name]["max_date"] = total_distinct[2]
+        for r in media_rows:
+            name = r["album_name"].strip()
+            src_meta = source_meta_by_id.get(r["source_id"])
+            owner = (src_meta["owner_username"] if src_meta else "") or ""
+            is_shared_loc = bool(src_meta["is_shared_local"]) if src_meta else False
+            is_smb_src = is_smb_path(src_meta["path_location"]) if src_meta else False
+            sync_st = (src_meta["sync_status"] if src_meta else "") or ""
+
+            if name not in album_dict:
+                album_dict[name] = {
+                    "album_name": name,
+                    "min_date": r["min_date"] or "",
+                    "max_date": r["max_date"] or "",
+                    "count": r["item_count"] or 0,
+                    "is_virtual": False,
+                    "is_smb": is_smb_src,
+                    "sync_status": sync_st,
+                    "source_id": r["source_id"],
+                    "owner_username": owner,
+                    "is_shared_local": is_shared_loc,
+                    "is_shared_from_other": bool(current_user and owner and owner != current_user),
+                    "is_subfolder": True
+                }
+            else:
+                album_dict[name]["min_date"] = r["min_date"] or album_dict[name]["min_date"]
+                album_dict[name]["max_date"] = r["max_date"] or album_dict[name]["max_date"]
+                album_dict[name]["count"] = (album_dict[name]["count"] or 0) + (r["item_count"] or 0)
+
+    if visible_va_map:
+        va_names = list(visible_va_map.keys())
+        va_placeholders = ",".join(["?"] * len(va_names))
+        virt_rows = conn.execute(f"""
+            SELECT vai.album_name,
+                   MIN(m.date_taken) AS min_date,
+                   MAX(m.date_taken) AS max_date,
+                   COUNT(DISTINCT m.id) AS item_count
+            FROM virtual_album_items vai
+            JOIN media m ON m.id = vai.media_id
+            WHERE vai.album_name IN ({va_placeholders})
+            GROUP BY vai.album_name
+        """, va_names).fetchall()
+        for r in virt_rows:
+            name = r["album_name"].strip()
+            if name in album_dict:
+                album_dict[name]["count"] = max(album_dict[name]["count"], r["item_count"] or 0)
+                if r["min_date"]:
+                    album_dict[name]["min_date"] = r["min_date"]
+                if r["max_date"]:
+                    album_dict[name]["max_date"] = r["max_date"]
 
     albums = sorted(album_dict.values(), key=lambda x: x["album_name"].lower())
     return albums
@@ -1282,13 +1922,13 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
         print(f"{self.address_string()} - - [{self.log_date_time_string()}] {msg}")
 
     def send_json(self, data, status=200, extra_headers=None):
-        body = json.dumps(data).encode("utf-8")
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Memoria-User")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Memoria-User, X-Memoria-Auth")
         if extra_headers:
             for hk, hv in extra_headers.items():
                 self.send_header(hk, hv)
@@ -1357,7 +1997,7 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Memoria-User")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Memoria-User, X-Memoria-Auth")
         self.end_headers()
 
     def do_HEAD(self):
@@ -1444,11 +2084,73 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             self.send_json({"error": "Authentication required. Please sign in."}, status=401)
             return
 
+        include_shared = (query.get("include_shared", ["0"])[0] or "0").strip().lower() in ("1", "true", "yes")
+
         if path == "/api/media/albums":
             conn = get_db()
-            albums = get_all_albums_summary(conn)
+            albums = get_all_albums_summary(conn, current_user=auth_user, include_shared=include_shared)
             conn.close()
             self.send_json(albums)
+            return
+
+        elif path == "/api/media/globe":
+            # Fix 1(a): Pre-load all GPS photos in advance for the Globe View
+            search = query.get("search", [None])[0]
+            date_from = query.get("date_from", [None])[0]
+            date_to = query.get("date_to", [None])[0]
+            album = query.get("album", [None])[0]
+
+            conn = get_db()
+            vis_sql, vis_params = build_user_visibility_sql(conn, auth_user, include_shared=include_shared)
+            where = [vis_sql, "latitude IS NOT NULL", "longitude IS NOT NULL"]
+            params = list(vis_params)
+
+            if album:
+                where.append("(album_name = ? OR id IN (SELECT media_id FROM virtual_album_items WHERE album_name = ?))")
+                params.extend([album, album])
+            if search:
+                where.append("(caption LIKE ? OR album_name LIKE ?)")
+                params.extend([f"%{search}%", f"%{search}%"])
+            if date_from:
+                where.append("date_taken >= ?")
+                params.append(date_from + " 00:00:00" if len(date_from) == 10 else date_from)
+            if date_to:
+                where.append("date_taken <= ?")
+                params.append(date_to + " 23:59:59" if len(date_to) == 10 else date_to)
+
+            where_sql = " AND ".join(where)
+            rows = conn.execute(
+                f"SELECT id, album_name, file_type, date_taken, latitude, longitude, caption, width, height, exif_json FROM media WHERE {where_sql} ORDER BY date_taken DESC, id DESC",
+                params
+            ).fetchall()
+
+            items = []
+            for r in rows:
+                try:
+                    exif_obj = json.loads(r["exif_json"]) if r["exif_json"] else {}
+                except Exception:
+                    exif_obj = {}
+                cap = r["caption"] or ""
+                if not cap and r["latitude"] is not None and r["longitude"] is not None:
+                    cap = reverse_geocode_lat_lon(r["latitude"], r["longitude"], conn)
+                items.append({
+                    "id": r["id"],
+                    "album_name": album if album else r["album_name"],
+                    "origin_album": r["album_name"],
+                    "file_type": r["file_type"],
+                    "date_taken": r["date_taken"],
+                    "latitude": r["latitude"],
+                    "longitude": r["longitude"],
+                    "caption": cap,
+                    "width": r["width"] or 1200,
+                    "height": r["height"] or 800,
+                    "exif": exif_obj
+                })
+            conn.close()
+            self.send_json({
+                "total_gps": len(items),
+                "items": items
+            })
             return
 
         elif path == "/api/media":
@@ -1469,9 +2171,11 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             order_sql = order_map.get(sort, "date_taken DESC, id DESC")
 
             conn = get_db()
+            vis_sql, vis_params = build_user_visibility_sql(conn, auth_user, include_shared=include_shared)
+
             # Compute album min_date and max_date (before date_from/date_to filter) for the sliding date bar!
-            album_where = ["1=1"]
-            album_params = []
+            album_where = [vis_sql]
+            album_params = list(vis_params)
             if album:
                 album_where.append("(album_name = ? OR id IN (SELECT media_id FROM virtual_album_items WHERE album_name = ?))")
                 album_params.extend([album, album])
@@ -1507,6 +2211,9 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                     exif_obj = json.loads(r["exif_json"]) if r["exif_json"] else {}
                 except Exception:
                     exif_obj = {}
+                cap = r["caption"] or ""
+                if not cap and r["latitude"] is not None and r["longitude"] is not None:
+                    cap = reverse_geocode_lat_lon(r["latitude"], r["longitude"], conn)
                 items.append({
                     "id": r["id"],
                     "album_name": album if album else r["album_name"],
@@ -1515,7 +2222,7 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                     "date_taken": r["date_taken"],
                     "latitude": r["latitude"],
                     "longitude": r["longitude"],
-                    "caption": r["caption"],
+                    "caption": cap,
                     "thumb_hash": r["thumb_hash"],
                     "width": r["width"] or 1200,
                     "height": r["height"] or 800,
@@ -1622,7 +2329,8 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
         elif path == "/api/config":
             conn = get_db()
             rows = conn.execute(
-                "SELECT id, album_name, path_location, tags, last_synced, smb_username, smb_password, sync_status FROM sources_config ORDER BY id ASC"
+                "SELECT id, album_name, path_location, tags, last_synced, smb_username, smb_password, sync_status, owner_username, is_shared_local FROM sources_config WHERE owner_username = ? OR owner_username = '' ORDER BY id ASC",
+                (auth_user,)
             ).fetchall()
             items = []
             for r in rows:
@@ -1637,16 +2345,45 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                     "smb_username": dec_user,
                     "has_smb_password": has_pw,
                     "smb_password": "••••••••" if has_pw else "",
-                    "sync_status": r["sync_status"] or ""
+                    "sync_status": r["sync_status"] or "",
+                    "owner_username": r["owner_username"] or auth_user,
+                    "is_shared_local": bool(r["is_shared_local"])
                 })
             conn.close()
             self.send_json(items)
             return
 
+        elif path == "/api/users":
+            conn = get_db()
+            u_rows = conn.execute("SELECT id, username, created_at FROM users ORDER BY id ASC").fetchall()
+            users_list = []
+            for ur in u_rows:
+                uname = ur["username"]
+                src_cnt = conn.execute("SELECT COUNT(*) FROM sources_config WHERE owner_username = ?", (uname,)).fetchone()[0]
+                sh_cnt = conn.execute("SELECT COUNT(*) FROM sources_config WHERE owner_username = ? AND is_shared_local = 1", (uname,)).fetchone()[0]
+                users_list.append({
+                    "id": ur["id"],
+                    "username": uname,
+                    "created_at": ur["created_at"],
+                    "source_count": src_cnt,
+                    "shared_source_count": sh_cnt,
+                    "is_current": (uname == auth_user)
+                })
+            conn.close()
+            self.send_json(users_list)
+            return
+
+        elif path == "/api/tasks/status":
+            # New 4: Running background task status for Settings -> "Tasking in Running"
+            self.send_json(get_tasks_status_snapshot())
+            return
+
         elif path == "/api/share/list":
+            # New 3: Most recent 20 shared album links & passcodes
             conn = get_db()
             rows = conn.execute(
-                "SELECT id, share_token, passcode, album_name, media_ids, created_at FROM sharing_albums ORDER BY id DESC"
+                "SELECT id, share_token, passcode, album_name, media_ids, owner_username, created_at FROM sharing_albums WHERE owner_username = ? OR owner_username = '' ORDER BY id DESC LIMIT 20",
+                (auth_user,)
             ).fetchall()
             conn.close()
             items = []
@@ -1661,6 +2398,7 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                     "passcode": r["passcode"],
                     "album_name": r["album_name"],
                     "media_count": len(mids),
+                    "owner_username": r["owner_username"] or auth_user,
                     "created_at": r["created_at"],
                     "share_url": f"/?share={r['share_token']}"
                 })
@@ -1675,7 +2413,7 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             conn = get_db()
             media_count = conn.execute("SELECT COUNT(*) FROM media").fetchone()[0]
             sources_count = conn.execute("SELECT COUNT(*) FROM sources_config").fetchone()[0]
-            albums = get_all_albums_summary(conn)
+            albums = get_all_albums_summary(conn, current_user=auth_user, include_shared=True)
             conn.close()
             html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1812,6 +2550,9 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                         exif_obj = json.loads(r["exif_json"]) if r["exif_json"] else {}
                     except Exception:
                         exif_obj = {}
+                    cap = r["caption"] or ""
+                    if not cap and r["latitude"] is not None and r["longitude"] is not None:
+                        cap = reverse_geocode_lat_lon(r["latitude"], r["longitude"], conn)
                     items.append({
                         "id": r["id"],
                         "album_name": row["album_name"],
@@ -1820,7 +2561,7 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                         "date_taken": r["date_taken"],
                         "latitude": r["latitude"],
                         "longitude": r["longitude"],
-                        "caption": r["caption"],
+                        "caption": cap,
                         "thumb_hash": r["thumb_hash"],
                         "width": r["width"] or 1200,
                         "height": r["height"] or 800,
@@ -1868,17 +2609,97 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
 
             with DB_WRITE_LOCK:
                 conn.execute("UPDATE users SET username = ?, password_hash = ? WHERE id = ?", (new_user, new_pass, user_row["id"]))
-                # FIX 1: If new_user is not 'demo', permanently remove any 'demo' or 'admin' accounts and sessions!
+                conn.execute("UPDATE sources_config SET owner_username = ? WHERE owner_username = ?", (new_user, curr_user))
+                conn.execute("UPDATE virtual_albums SET owner_username = ? WHERE owner_username = ?", (new_user, curr_user))
+                conn.execute("UPDATE sharing_albums SET owner_username = ? WHERE owner_username = ?", (new_user, curr_user))
                 if new_user.lower() not in ("demo", "admin"):
                     conn.execute("DELETE FROM users WHERE LOWER(username) IN ('demo', 'admin')")
                     conn.execute("DELETE FROM user_sessions WHERE LOWER(username) IN ('demo', 'admin')")
                     for k, v in list(ACTIVE_SESSIONS.items()):
-                        if v.lower() in ("demo", "admin"):
+                        if v.lower() in ("demo", "admin") or v == curr_user:
                             ACTIVE_SESSIONS[k] = new_user
-                    conn.execute("UPDATE user_sessions SET username = ? WHERE LOWER(username) IN ('demo', 'admin')", (new_user,))
+                    conn.execute("UPDATE user_sessions SET username = ? WHERE LOWER(username) IN ('demo', 'admin') OR username = ?", (new_user, curr_user))
                 conn.commit()
             conn.close()
             self.send_json({"status": "ok", "username": new_user, "message": "Credentials updated and demo account permanently removed."})
+            return
+
+        elif path == "/api/users/add":
+            # New 1: Add a new local user account
+            new_u = decode_transport_secret(payload.get("username", "")).strip()
+            new_p = decode_transport_secret(payload.get("password", ""))
+            if not new_u or not new_p or len(new_p) < 4:
+                self.send_json({"error": "Username and password (min 4 characters) are required."}, status=400)
+                return
+            if new_u.lower() in ("demo", "admin"):
+                self.send_json({"error": "Reserved username cannot be created."}, status=400)
+                return
+
+            conn = get_db()
+            existing = conn.execute("SELECT id FROM users WHERE LOWER(username) = LOWER(?)", (new_u,)).fetchone()
+            if existing:
+                conn.close()
+                self.send_json({"error": f"User '{new_u}' already exists."}, status=400)
+                return
+
+            with DB_WRITE_LOCK:
+                conn.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (new_u, new_p))
+                conn.execute("DELETE FROM users WHERE LOWER(username) IN ('demo', 'admin')")
+                conn.commit()
+
+            u_rows = conn.execute("SELECT id, username, created_at FROM users ORDER BY id ASC").fetchall()
+            users_list = [
+                {
+                    "id": ur["id"],
+                    "username": ur["username"],
+                    "created_at": ur["created_at"],
+                    "is_current": (ur["username"] == auth_user)
+                }
+                for ur in u_rows
+            ]
+            conn.close()
+            self.send_json({"status": "ok", "username": new_u, "users": users_list})
+            return
+
+        elif path == "/api/users/delete":
+            target_u = (payload.get("username") or "").strip()
+            if not target_u:
+                self.send_json({"error": "Username is required."}, status=400)
+                return
+            if target_u == auth_user:
+                self.send_json({"error": "Cannot delete your currently logged-in account."}, status=400)
+                return
+
+            conn = get_db()
+            with DB_WRITE_LOCK:
+                conn.execute("DELETE FROM users WHERE username = ?", (target_u,))
+                conn.execute("DELETE FROM user_sessions WHERE username = ?", (target_u,))
+                for k, v in list(ACTIVE_SESSIONS.items()):
+                    if v == target_u:
+                        ACTIVE_SESSIONS.pop(k, None)
+                conn.commit()
+            u_rows = conn.execute("SELECT id, username, created_at FROM users ORDER BY id ASC").fetchall()
+            users_list = [
+                {
+                    "id": ur["id"],
+                    "username": ur["username"],
+                    "created_at": ur["created_at"],
+                    "is_current": (ur["username"] == auth_user)
+                }
+                for ur in u_rows
+            ]
+            conn.close()
+            self.send_json({"status": "deleted", "username": target_u, "users": users_list})
+            return
+
+        elif path == "/api/tasks/geo-caption":
+            # New 4: Trigger background Auto Geo-Captioning task
+            force = bool(payload.get("force", True))
+            started = trigger_auto_geo_caption_task(force_recheck=force)
+            self.send_json({
+                "status": "started" if started else "already_running",
+                "tasks": get_tasks_status_snapshot()
+            })
             return
 
         elif path == "/api/media/caption":
@@ -1931,10 +2752,15 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                 _SMB_AUTH_FAIL_CACHE.clear()
                 conn = get_db()
                 sources_list = payload if isinstance(payload, list) else (payload.get("sources") if isinstance(payload, dict) else None)
+                include_shared = bool(payload.get("include_shared")) if isinstance(payload, dict) else False
 
                 if isinstance(sources_list, list):
                     existing_rows = {
-                        r["id"]: r for r in conn.execute("SELECT id, album_name, path_location, smb_username, smb_password FROM sources_config").fetchall()
+                        r["id"]: r
+                        for r in conn.execute(
+                            "SELECT id, album_name, path_location, smb_username, smb_password, owner_username, is_shared_local FROM sources_config WHERE owner_username = ? OR owner_username = ''",
+                            (auth_user,)
+                        ).fetchall()
                     }
                     kept_ids = set()
                     kept_album_names = set()
@@ -1945,6 +2771,7 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                             path_loc = (cfg.get("path_location") or "").strip()
                             raw_u = cfg.get("smb_username") or ""
                             raw_p = cfg.get("smb_password") or ""
+                            is_shared_loc = 1 if cfg.get("is_shared_local") else 0
                             if not album_name or not path_loc:
                                 continue
 
@@ -1967,12 +2794,12 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                                     enc_p = encrypt_secret(dec_p) if dec_p else ""
 
                                 conn.execute(
-                                    "UPDATE sources_config SET album_name = ?, path_location = ?, smb_username = ?, smb_password = ? WHERE id = ?",
-                                    (album_name, path_loc, enc_u, enc_p, cfg_id)
+                                    "UPDATE sources_config SET album_name = ?, path_location = ?, smb_username = ?, smb_password = ?, owner_username = ?, is_shared_local = ? WHERE id = ?",
+                                    (album_name, path_loc, enc_u, enc_p, auth_user, is_shared_loc, cfg_id)
                                 )
                                 if old_name != album_name:
                                     conn.execute(
-                                        "UPDATE media SET album_name = ? WHERE source_id = ? OR album_name = ?",
+                                        "UPDATE media SET album_name = ? WHERE source_id = ? AND album_name = ?",
                                         (album_name, cfg_id, old_name)
                                     )
                                 kept_ids.add(cfg_id)
@@ -1981,8 +2808,8 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                                 enc_u = encrypt_secret(dec_u) if dec_u else ""
                                 enc_p = encrypt_secret(dec_p) if (dec_p and dec_p != "••••••••") else ""
                                 cur = conn.execute(
-                                    "INSERT INTO sources_config (album_name, path_location, smb_username, smb_password, last_synced) VALUES (?, ?, ?, ?, datetime('now'))",
-                                    (album_name, path_loc, enc_u, enc_p)
+                                    "INSERT INTO sources_config (album_name, path_location, smb_username, smb_password, last_synced, owner_username, is_shared_local) VALUES (?, ?, ?, ?, datetime('now'), ?, ?)",
+                                    (album_name, path_loc, enc_u, enc_p, auth_user, is_shared_loc)
                                 )
                                 kept_ids.add(cur.lastrowid)
                                 kept_album_names.add(album_name)
@@ -1995,9 +2822,10 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                                 conn.execute("DELETE FROM sources_config WHERE id = ?", (old_id,))
                         conn.commit()
 
-                added, errors_list, source_statuses = sync_all_sources(conn)
-                albums = get_all_albums_summary(conn)
-                total_indexed = conn.execute("SELECT COUNT(*) FROM media").fetchone()[0]
+                added, errors_list, source_statuses = sync_all_sources(conn, owner_filter=auth_user)
+                albums = get_all_albums_summary(conn, current_user=auth_user, include_shared=include_shared)
+                vis_sql, vis_params = build_user_visibility_sql(conn, auth_user, include_shared=include_shared)
+                total_indexed = conn.execute(f"SELECT COUNT(*) FROM media WHERE {vis_sql}", vis_params).fetchone()[0]
                 conn.close()
                 formatted_errors = [
                     (f"[{e.get('album_name', 'Folder')}] {e.get('error', '')}" if isinstance(e, dict) else str(e))
@@ -2010,7 +2838,8 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                     "albums": albums,
                     "errors": formatted_errors,
                     "error_objects": errors_list,
-                    "source_statuses": source_statuses
+                    "source_statuses": source_statuses,
+                    "tasks": get_tasks_status_snapshot()
                 })
             except Exception as e:
                 self.send_json({
@@ -2023,21 +2852,19 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
         elif path == "/api/config/delete":
             source_id = payload.get("id")
             album_name = (payload.get("album_name") or "").strip()
+            include_shared = bool(payload.get("include_shared", False))
             conn = get_db()
             with DB_WRITE_LOCK:
                 if source_id:
-                    row = conn.execute("SELECT album_name FROM sources_config WHERE id = ?", (source_id,)).fetchone()
-                    conn.execute("DELETE FROM media WHERE source_id = ?", (source_id,))
-                    conn.execute("DELETE FROM sources_config WHERE id = ?", (source_id,))
+                    row = conn.execute("SELECT album_name FROM sources_config WHERE id = ? AND (owner_username = ? OR owner_username = '')", (source_id, auth_user)).fetchone()
                     if row:
-                        remaining = conn.execute("SELECT COUNT(*) FROM sources_config WHERE album_name = ?", (row["album_name"],)).fetchone()[0]
-                        if remaining == 0:
-                            conn.execute("DELETE FROM media WHERE album_name = ?", (row["album_name"],))
+                        conn.execute("DELETE FROM media WHERE source_id = ?", (source_id,))
+                        conn.execute("DELETE FROM sources_config WHERE id = ?", (source_id,))
                 elif album_name:
-                    conn.execute("DELETE FROM media WHERE album_name = ?", (album_name,))
-                    conn.execute("DELETE FROM sources_config WHERE album_name = ?", (album_name,))
+                    conn.execute("DELETE FROM media WHERE album_name = ? OR album_name LIKE ?", (album_name, f"{album_name}- %"))
+                    conn.execute("DELETE FROM sources_config WHERE album_name = ? AND (owner_username = ? OR owner_username = '')", (album_name, auth_user))
                 conn.commit()
-            albums = get_all_albums_summary(conn)
+            albums = get_all_albums_summary(conn, current_user=auth_user, include_shared=include_shared)
             conn.close()
             self.send_json({"status": "deleted", "albums": albums})
             return
@@ -2045,6 +2872,8 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
         elif path == "/api/albums/virtual":
             album_name = (payload.get("album_name") or "").strip()
             media_ids = payload.get("media_ids") or []
+            is_shared_loc = 1 if payload.get("is_shared_local") else 0
+            include_shared = bool(payload.get("include_shared", False))
             if not album_name:
                 self.send_json({"error": "Album name is required."}, status=400)
                 return
@@ -2052,7 +2881,10 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             conn = get_db()
             added_count = 0
             with DB_WRITE_LOCK:
-                conn.execute("INSERT OR IGNORE INTO virtual_albums (album_name) VALUES (?)", (album_name,))
+                conn.execute(
+                    "INSERT OR IGNORE INTO virtual_albums (album_name, owner_username, is_shared_local) VALUES (?, ?, ?)",
+                    (album_name, auth_user, is_shared_loc)
+                )
                 if isinstance(media_ids, list) and len(media_ids) > 0:
                     placeholders = ",".join(["?"] * len(media_ids))
                     valid_rows = conn.execute(f"SELECT id FROM media WHERE id IN ({placeholders})", media_ids).fetchall()
@@ -2064,7 +2896,7 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                         if cur.rowcount > 0:
                             added_count += 1
                 conn.commit()
-            albums = get_all_albums_summary(conn)
+            albums = get_all_albums_summary(conn, current_user=auth_user, include_shared=include_shared)
             conn.close()
             self.send_json({
                 "status": "ok",
@@ -2076,13 +2908,14 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
 
         elif path == "/api/albums/virtual/delete":
             album_name = (payload.get("album_name") or "").strip()
+            include_shared = bool(payload.get("include_shared", False))
             conn = get_db()
             with DB_WRITE_LOCK:
                 conn.execute("DELETE FROM virtual_album_items WHERE album_name = ?", (album_name,))
-                conn.execute("DELETE FROM virtual_albums WHERE album_name = ?", (album_name,))
-                conn.execute("DELETE FROM sharing_albums WHERE album_name = ?", (album_name,))
+                conn.execute("DELETE FROM virtual_albums WHERE album_name = ? AND (owner_username = ? OR owner_username = '')", (album_name, auth_user))
+                conn.execute("DELETE FROM sharing_albums WHERE album_name = ? AND (owner_username = ? OR owner_username = '')", (album_name, auth_user))
                 conn.commit()
-            albums = get_all_albums_summary(conn)
+            albums = get_all_albums_summary(conn, current_user=auth_user, include_shared=include_shared)
             conn.close()
             self.send_json({"status": "deleted", "albums": albums})
             return
@@ -2090,6 +2923,7 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
         elif path == "/api/share":
             album_name = (payload.get("album_name") or "").strip()
             req_media_ids = payload.get("media_ids") or []
+            include_shared = bool(payload.get("include_shared", False))
             if not album_name:
                 album_name = f"Shared Album {datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
@@ -2117,18 +2951,18 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             passcode = f"{secrets.randbelow(10000):04d}"
 
             with DB_WRITE_LOCK:
-                conn.execute("INSERT OR IGNORE INTO virtual_albums (album_name) VALUES (?)", (album_name,))
+                conn.execute("INSERT OR IGNORE INTO virtual_albums (album_name, owner_username) VALUES (?, ?)", (album_name, auth_user))
                 for mid in valid_ids:
                     conn.execute(
                         "INSERT OR IGNORE INTO virtual_album_items (album_name, media_id) VALUES (?, ?)",
                         (album_name, mid)
                     )
                 conn.execute("""
-                    INSERT INTO sharing_albums (share_token, passcode, album_name, media_ids)
-                    VALUES (?, ?, ?, ?)
-                """, (share_token, passcode, album_name, json.dumps(valid_ids)))
+                    INSERT INTO sharing_albums (share_token, passcode, album_name, media_ids, owner_username)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (share_token, passcode, album_name, json.dumps(valid_ids), auth_user))
                 conn.commit()
-            albums = get_all_albums_summary(conn)
+            albums = get_all_albums_summary(conn, current_user=auth_user, include_shared=include_shared)
             conn.close()
 
             self.send_json({
@@ -2146,7 +2980,7 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             share_token = (payload.get("share_token") or "").strip()
             conn = get_db()
             with DB_WRITE_LOCK:
-                conn.execute("DELETE FROM sharing_albums WHERE share_token = ?", (share_token,))
+                conn.execute("DELETE FROM sharing_albums WHERE share_token = ? AND (owner_username = ? OR owner_username = '')", (share_token, auth_user))
                 conn.commit()
             conn.close()
             self.send_json({"status": "deleted", "share_token": share_token})

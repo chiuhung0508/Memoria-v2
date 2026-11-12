@@ -203,3 +203,81 @@ flowchart LR
 * **Direct Photo Byte Stream (`GET /api/stream/file/:id`):** **$8.03\text{ ms}$ avg** ($7.56\text{ ms}$ min) vs. $200\text{ ms} - 800\text{ ms}$ on typical websites.
 * **Offline 3D Globe Vector Boundaries (`/vendor/world-countries.geojson`):** **$8.92\text{ ms}$ avg** ($7.84\text{ ms}$ min) vs. $300\text{ ms} - 900\text{ ms}$ on external map tile services.
 
+---
+
+## 6. Multi-User, Clustering & Background Processing Architecture
+
+### 6.1 Multi-User Isolation & Local Sharing Security Matrix
+
+Memoria v2 enforces granular per-user media scoping while permitting flexible local household sharing:
+
+```mermaid
+flowchart TD
+    User["Request from Authenticated User (U)"]
+    Query["Incoming SQL Query / Visibility Filter"]
+    CheckSource{"Source / Album Scope"}
+    OwnAlbum["Personal Album / Source\n(owner_username = U)"]
+    SharedAlbum["Shared Local Resource\n(is_shared_local = 1)"]
+    Deny["Access Blocked / Hidden from Results"]
+    IncludeShared{"include_shared flag enabled?"}
+
+    User --> Query --> CheckSource
+    CheckSource -->|"Owned by U"| OwnAlbum -->|"Allowed"| Result["Render in Gallery / Catalog"]
+    CheckSource -->|"Owned by other"| SharedAlbum
+    SharedAlbum --> IncludeShared
+    IncludeShared -->|"Yes (👥 Shared active)"| Result
+    IncludeShared -->|"No (Default)"| Deny
+    CheckSource -->|"Private to other"| Deny
+```
+
+* **Table Isolation:** `sources_config`, `virtual_albums`, and `sharing_albums` maintain an `owner_username` column and an `is_shared_local` boolean.
+* **SQL Query Filter Builder:** `build_user_visibility_sql(auth_user, include_shared)` dynamically constructs indexed `WHERE` clauses ensuring zero metadata leakage between users.
+* **Sidebar Toggle:** The 👥 Shared button provides a clean opt-in view for community photos without cluttering private workspaces.
+
+### 6.2 Subfolder Hierarchical Album Mapping (UTF-8 / CJK)
+
+When a directory or SMB share containing nested folders is added, the indexing scanner recursively determines relative paths and dynamically synthesizes album identities:
+
+$$\text{Album Name} = \text{Added Album Name} + \sum_{i=1}^{n} \left( \text{"- "} + \text{Subfolder}_i \right)$$
+
+* **UTF-8 Normalization:** Full Unicode compliance ensures Chinese, Japanese, Korean, and Latin characters are preserved across SQLite identifiers and URI parameters.
+* **Path Disambiguation:** Local and SMB walks separate file path components using OS-agnostic separators (`/` and `\`), mapping each distinct folder into an independently queryable album.
+
+### 6.3 Background Task Architecture & Reverse Geocoding
+
+```mermaid
+sequenceDiagram
+    participant S as Server Startup / Sync
+    participant W as Background Worker Thread
+    participant DB as SQLite3 (geocode_cache & media)
+    participant UI as Settings: Tasking in Running
+
+    S->>W: trigger_auto_geo_caption_task()
+    W->>DB: Query media rows WHERE latitude IS NOT NULL AND caption = ''
+    loop For Each Geotagged Photo
+        W->>DB: Check geocode_cache (lat, lon rounded)
+        alt Cache Miss
+            W->>W: Offline Haversine Distance Search against OFFLINE_PLACES
+            W->>DB: INSERT INTO geocode_cache
+        end
+        W->>DB: UPDATE media SET caption = 'City/Town, Country'
+        W->>W: Update progress percentage & counts
+    end
+    UI->>S: GET /api/tasks/status (polling every 2.5s)
+    S-->>UI: Task status JSON (progress %, running: true/false)
+    Note over UI: UI displays progress bar, auto-hides when running = false
+```
+
+* **Offline Place Index:** Uses an offline geographic reference table and Haversine geodesic calculations ($\Delta\sigma = 2\arcsin\sqrt{\sin^2(\Delta\phi/2) + \cos\phi_1\cos\phi_2\sin^2(\Delta\lambda/2)}$) with fallback to reverse geocoding API caching.
+* **Non-Blocking Execution:** Runs as an independent daemon thread with write batching, guaranteeing the HTTP server remains immediately responsive to user interactions.
+
+### 6.4 3D Globe Screen-Space Cluster Algorithm
+
+To prevent geotagged photo pins from stacking and obscuring each other when zoomed out, the 3D Globe uses dynamic screen-space clustering:
+
+1. **Pre-Caching:** `/api/media/globe` delivers all geotagged points in advance, bypassing grid pagination constraints.
+2. **Projective Clustering:** On every camera motion (`moveend`), spherical coordinates $(\phi, \lambda)$ are projected onto the 2D viewport plane $(x, y) = \text{project}(\phi, \lambda)$.
+3. **Euclidean Neighbor Merging:** Points within a radius $R = 64\text{ px}$ are aggregated into a cluster node with an iOS-style count badge.
+4. **Hierarchical Unfurling:** Clicking any cluster zooms the camera closer, naturally splitting the cluster into finer groups or individual photo pins. A cluster preview drawer allows quick inspection of all images within any cluster.
+
+

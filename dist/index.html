@@ -66,21 +66,100 @@
       transform: translateX(0);
     }
 
-    /* 3D Globe Pins */
+    /* 3D Globe Pins & iOS-Style Location Clusters */
     .globe-marker-pin {
-      width: 44px;
-      height: 44px;
-      border-radius: 10px;
-      border: 2px solid #ffffff;
-      box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      border: 2.5px solid #ffffff;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.6);
       object-fit: cover;
       cursor: pointer;
-      transition: transform 0.2s ease;
+      transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+      background: #18181b;
     }
     .globe-marker-pin:hover {
-      transform: scale(1.25) translateY(-4px);
+      transform: scale(1.18) translateY(-4px);
       border-color: var(--accent);
-      z-index: 50;
+      z-index: 60;
+    }
+    .ios-cluster-pin {
+      position: relative;
+      width: 56px;
+      height: 56px;
+      cursor: pointer;
+      user-select: none;
+      transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    .ios-cluster-pin:hover {
+      transform: scale(1.14) translateY(-4px);
+      z-index: 80 !important;
+    }
+    .ios-cluster-stack-back {
+      position: absolute;
+      inset: 0;
+      border-radius: 14px;
+      background: #27272a;
+      border: 2px solid rgba(255, 255, 255, 0.65);
+      transform: rotate(6deg) translate(3px, -2px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.45);
+      pointer-events: none;
+    }
+    .ios-cluster-card {
+      position: relative;
+      width: 56px;
+      height: 56px;
+      border-radius: 14px;
+      overflow: hidden;
+      border: 2.5px solid #ffffff;
+      background: #18181b;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.65);
+    }
+    .ios-cluster-card img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .ios-cluster-badge {
+      position: absolute;
+      top: -7px;
+      right: -7px;
+      min-width: 22px;
+      height: 20px;
+      padding: 0 6px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #2563eb, #1d4ed8);
+      color: #ffffff;
+      font-size: 10px;
+      font-weight: 800;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 2px solid #ffffff;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+      z-index: 5;
+    }
+    .ios-cluster-label {
+      position: absolute;
+      left: 50%;
+      bottom: -18px;
+      transform: translateX(-50%);
+      background: rgba(15, 23, 42, 0.9);
+      backdrop-filter: blur(6px);
+      color: #f8fafc;
+      font-size: 9px;
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.18);
+      white-space: nowrap;
+      max-width: 130px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      pointer-events: none;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.45);
     }
 
     /* Caption Window */
@@ -369,6 +448,9 @@
         <div class="flex items-center gap-1 shrink-0">
           <button id="sort-name-btn" onclick="toggleNameSort()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="text-[10px] px-1.5 py-0.5 rounded border text-zinc-400 hover:border-blue-500 transition" title="Sort by Folder Name (ASC / DESC)">🔤 Name ↑</button>
           <button id="sort-toggle-btn" onclick="toggleDateSort()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="text-[10px] px-1.5 py-0.5 rounded border text-blue-400 border-blue-500/60 hover:border-blue-500 transition" title="Sort by Date (ASC / DESC)">📅 Date ↑</button>
+          <button id="sidebar-shared-toggle-btn" onclick="toggleSidebarSharedFilter()" style="background-color: var(--bg-input); border-color: var(--border-color);" class="text-[10px] px-1.5 py-0.5 rounded border text-zinc-400 hover:border-emerald-500 transition flex items-center gap-0.5" title="Check to view albums shared by other local users (Default: unchecked)">
+            <span id="sidebar-shared-check-icon">☐</span> <span>👥 Shared</span>
+          </button>
         </div>
       </div>
       <div class="mt-2.5 mb-2 flex items-center gap-1.5">
@@ -515,8 +597,39 @@
         <div id="media-grid" style="grid-template-columns: repeat(6, minmax(0, 1fr));" class="grid gap-3"></div>
       </div>
 
-      <div id="view-globe" class="h-full w-full hidden">
+      <div id="view-globe" class="h-full w-full hidden relative">
         <div id="map-container" class="h-full w-full"></div>
+
+        <!-- GLOBE HUD BAR (Shows pre-loaded GPS count & Fit All button) -->
+        <div class="absolute top-4 left-4 z-30 flex items-center gap-2 pointer-events-auto">
+          <div class="bg-zinc-950/85 backdrop-blur-md border border-zinc-700/80 rounded-xl px-3.5 py-2 shadow-xl flex items-center gap-2.5">
+            <span class="text-sm">🌍</span>
+            <div>
+              <div id="globe-hud-count" class="text-xs font-bold text-white">0 GPS Photos Pre-loaded</div>
+              <div id="globe-hud-clusters" class="text-[10px] text-zinc-400">Zoom in/out to expand nearby location groups</div>
+            </div>
+            <button onclick="fitGlobeToAllPhotos()" class="ml-2 px-2.5 py-1 bg-blue-600/25 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/40 rounded-lg text-[10px] font-semibold transition">
+              🎯 Fit All
+            </button>
+          </div>
+        </div>
+
+        <!-- iOS PHOTOS MAP CLUSTER DRAWER (Opens when clicking a stacked location cluster) -->
+        <div id="globe-cluster-drawer" class="hidden absolute bottom-5 left-5 right-5 md:right-auto md:w-[540px] max-h-[62vh] bg-zinc-950/92 backdrop-blur-xl border border-zinc-700/80 rounded-2xl shadow-2xl z-30 flex-col overflow-hidden pointer-events-auto">
+          <div class="px-4 py-3 border-b border-zinc-800 flex items-center justify-between gap-2">
+            <div class="min-w-0">
+              <div id="globe-cluster-title" class="text-xs font-bold text-white truncate">📍 Location Cluster</div>
+              <div id="globe-cluster-subtitle" class="text-[10px] text-zinc-400">Click any photo to open full resolution</div>
+            </div>
+            <div class="flex items-center gap-1.5 shrink-0">
+              <button id="globe-cluster-zoom-btn" class="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-[10px] font-semibold transition">
+                🔍 Zoom In Here
+              </button>
+              <button onclick="closeGlobeClusterDrawer()" class="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white rounded-lg text-xs font-bold">✕</button>
+            </div>
+          </div>
+          <div id="globe-cluster-grid" class="p-3 overflow-y-auto grid grid-cols-4 sm:grid-cols-5 gap-2 max-h-[48vh]"></div>
+        </div>
       </div>
     </main>
 
@@ -541,25 +654,37 @@
       <div style="border-color: var(--border-color);" class="flex items-center justify-between pb-4 border-b">
         <div>
           <h2 class="text-xl font-bold">⚙️ Memoria Settings</h2>
-          <p class="text-zinc-400 text-xs">Configure source directories, virtual albums, database indexes, and security.</p>
+          <p class="text-zinc-400 text-xs">Configure multi-user accounts, per-user source directories, shared album links, and background indexing tasks.</p>
         </div>
         <button onclick="closeSettingsPage()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-semibold transition text-xs shadow-md">✕ Close</button>
       </div>
 
-      <!-- ACCOUNT SECURITY SECTION (Auto-collapsed by default, click header to expand) -->
+      <!-- NEW 4: TASKING IN RUNNING SECTION (Auto-shown while backend task runs, auto-hidden when done) -->
+      <section id="settings-running-tasks-section" style="background-color: var(--bg-panel); border-color: var(--border-color);" class="hidden p-6 rounded-2xl border border-blue-500/40 shadow-lg">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-sm font-bold flex items-center gap-2 text-blue-400">
+            <span class="animate-spin inline-block">⏳</span>
+            <span>Tasking in Running</span>
+          </h3>
+          <span class="px-2 py-0.5 text-[10px] rounded font-semibold bg-blue-500/20 text-blue-300 border border-blue-500/30">Active Backend Task • Auto-hides when done</span>
+        </div>
+        <div id="settings-running-tasks-list" class="space-y-3"></div>
+      </section>
+
+      <!-- ACCOUNT SECURITY & MULTI-USER SECTION (Auto-collapsed by default, click header to expand) -->
       <section style="background-color: var(--bg-panel); border-color: var(--border-color);" class="p-6 rounded-2xl border">
         <div onclick="toggleSettingsSection('security')" class="flex items-center justify-between cursor-pointer select-none group">
           <div>
             <h3 class="text-sm font-bold flex items-center gap-2 group-hover:text-blue-400 transition">
               <span id="settings-chevron-security" class="text-zinc-400 text-xs w-3 inline-block">▸</span>
-              <span>🔐</span> Account Security &amp; Credentials
+              <span>🔐</span> Account Security, Credentials &amp; Multi-User Access
             </h3>
-            <p class="text-zinc-400 text-[11px] mt-0.5 pl-5">Update administrator credentials to secure your vault access.</p>
+            <p class="text-zinc-400 text-[11px] mt-0.5 pl-5">Update your credentials or add local user accounts with per-user private/shared folder visibility.</p>
           </div>
           <span id="security-badge" class="px-2 py-0.5 text-[10px] rounded font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30">Action Recommended</span>
         </div>
 
-        <div id="settings-sec-security" style="border-color: var(--border-color);" class="hidden pt-4 mt-4 border-t space-y-4">
+        <div id="settings-sec-security" style="border-color: var(--border-color);" class="hidden pt-4 mt-4 border-t space-y-5">
           <div id="default-cred-warning" class="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3.5 text-xs text-amber-200 flex items-start gap-3">
             <span class="text-lg">⚠️</span>
             <div>
@@ -569,6 +694,7 @@
           </div>
 
           <form id="cred-form" onsubmit="event.preventDefault(); updateAccountCredentials();" class="space-y-3">
+            <div class="text-xs font-bold text-zinc-300">Update Current User Credentials</div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div>
                 <label class="block text-zinc-400 text-[11px] mb-1 font-medium">Current Password</label>
@@ -597,6 +723,27 @@
               <span id="cred-status-msg" class="text-xs"></span>
             </div>
           </form>
+
+          <!-- NEW 1: LOCAL MULTI-USER MANAGEMENT -->
+          <div style="border-color: var(--border-color);" class="pt-4 border-t space-y-3">
+            <div class="flex items-center justify-between">
+              <div>
+                <div class="text-xs font-bold text-zinc-200 flex items-center gap-1.5"><span>👥</span> Local Users (Per-User Album Visibility)</div>
+                <p class="text-[11px] text-zinc-400">Each user only sees their own private folders unless a folder is checked as "Shared with other local users".</p>
+              </div>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2">
+              <input id="new-local-user-name" type="text" placeholder="New local username" style="background-color: var(--bg-input); border-color: var(--border-color);" class="border rounded-lg px-3 py-1.5 text-xs w-48 focus:outline-none focus:border-blue-500" />
+              <input id="new-local-user-pass" type="password" placeholder="Password (min 4 chars)" style="background-color: var(--bg-input); border-color: var(--border-color);" class="border rounded-lg px-3 py-1.5 text-xs w-48 focus:outline-none focus:border-blue-500" />
+              <button onclick="addLocalUserAccount()" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-lg text-xs transition">
+                + Add Local User
+              </button>
+              <span id="local-user-status-msg" class="text-xs"></span>
+            </div>
+
+            <div id="local-users-list" class="space-y-1.5"></div>
+          </div>
         </div>
       </section>
 
@@ -608,14 +755,14 @@
               <span id="settings-chevron-sources" class="text-zinc-400 text-xs w-3 inline-block">▸</span>
               <span>📂</span> Source Directories &amp; SMB Shares
             </h3>
-            <p class="text-zinc-400 text-[11px] mt-0.5 pl-5">Add or remove folder albums mapped to physical paths or encrypted SMB mounts.</p>
+            <p class="text-zinc-400 text-[11px] mt-0.5 pl-5">Add or remove folder albums mapped to physical paths or encrypted SMB mounts. Subfolders map automatically as <code class="text-blue-400">[Album]- [Subfolder]</code>.</p>
           </div>
-          <span class="text-[10px] px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30">🔒 Encrypted SMB Vault</span>
+          <span class="text-[10px] px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30">🔒 Per-User &amp; Encrypted SMB</span>
         </div>
 
         <div id="settings-sec-sources" style="border-color: var(--border-color);" class="hidden pt-4 mt-4 border-t space-y-4">
           <div class="flex items-center justify-between">
-            <span class="text-[11px] text-zinc-400">SMB credentials are encrypted at rest with backend Fernet keys and masked in API responses.</span>
+            <span class="text-[11px] text-zinc-400">Check <strong class="text-emerald-400">"Share with other local users"</strong> on any path to allow other local accounts to view it via the sidebar Shared toggle.</span>
             <button onclick="addNewSourceRow()" class="px-3 py-1.5 bg-blue-600/20 text-blue-400 border border-blue-500/30 hover:bg-blue-600 hover:text-white rounded-lg transition text-xs font-semibold shrink-0">+ Add Path</button>
           </div>
           <div class="space-y-2" id="source-paths-list"></div>
@@ -623,6 +770,28 @@
             <button onclick="saveSourcesConfig()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg text-xs transition shrink-0">Save Sources</button>
             <span id="sources-status-msg" class="text-xs font-medium text-right"></span>
           </div>
+        </div>
+      </section>
+
+      <!-- NEW 3: SHARED ALBUM SECTION (Most recent 20 shared links & passcodes, auto-collapsed by default) -->
+      <section style="background-color: var(--bg-panel); border-color: var(--border-color);" class="p-6 rounded-2xl border">
+        <div onclick="toggleSettingsSection('shared')" class="flex items-center justify-between cursor-pointer select-none group">
+          <div>
+            <h3 class="text-sm font-bold flex items-center gap-2 group-hover:text-blue-400 transition">
+              <span id="settings-chevron-shared" class="text-zinc-400 text-xs w-3 inline-block">▸</span>
+              <span>🔗</span> Shared Album
+            </h3>
+            <p class="text-zinc-400 text-[11px] mt-0.5 pl-5">View the most recent 20 shared virtual album links and their 4-digit access passcodes.</p>
+          </div>
+          <span id="settings-shared-count-badge" class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">Most Recent 20</span>
+        </div>
+
+        <div id="settings-sec-shared" style="border-color: var(--border-color);" class="hidden pt-4 mt-4 border-t space-y-3">
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] text-zinc-400">Share links provide read-only access to linked database photos when unlocked with the 4-digit passcode.</span>
+            <button onclick="loadSettingsSharedAlbums()" class="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-[11px] border border-zinc-700">↻ Refresh List</button>
+          </div>
+          <div id="settings-shared-albums-list" class="space-y-2 max-h-96 overflow-y-auto"></div>
         </div>
       </section>
 
@@ -634,13 +803,16 @@
               <span id="settings-chevron-reload" class="text-zinc-400 text-xs w-3 inline-block">▸</span>
               <span>🔄</span> Reload Media Index
             </h3>
-            <p class="text-zinc-400 text-[11px] mt-0.5 pl-5">Synchronize configured source folders and refresh the sidebar Album Catalog.</p>
+            <p class="text-zinc-400 text-[11px] mt-0.5 pl-5">Synchronize configured source folders, map subfolders, and run background Geo-Captioning (<code class="text-blue-400">City/Town, Country</code>).</p>
           </div>
           <span id="sync-status-msg" class="text-xs font-medium text-right max-w-md"></span>
         </div>
 
         <div id="settings-sec-reload" style="border-color: var(--border-color);" class="hidden pt-4 mt-4 border-t space-y-3">
-          <button onclick="triggerDatabaseReindex()" class="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-lg text-xs transition">🔄 Reload Index &amp; Sync Database</button>
+          <div class="flex flex-wrap items-center gap-2.5">
+            <button onclick="triggerDatabaseReindex()" class="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-lg text-xs transition">🔄 Reload Index &amp; Sync Database</button>
+            <button onclick="triggerAutoGeoCaptionTask()" class="px-4 py-2.5 bg-blue-600/25 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/40 font-semibold rounded-lg text-xs transition">🌍 Run Auto Geo-Caption Task (City/Town + Country)</button>
+          </div>
           <div id="sync-error-details" class="hidden rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-300 space-y-1"></div>
         </div>
       </section>
@@ -893,8 +1065,15 @@
     }
 
     let sourceConfigurations = [
-      { id: 1, name: "Japan Travel", path: "/media_sources/photos" }
+      { id: 1, name: "Japan Travel", path: "/media_sources/photos", is_shared_local: false }
     ];
+
+    // New 1: Sidebar Shared Toggle State (default = unchecked / false)
+    let includeSharedAlbums = false;
+
+    // Fix 1(a): Pre-loaded GPS items for Globe View
+    let globeMediaItems = [];
+    let hasInitialGlobeAutoFit = false;
 
     async function loadSourcesConfig() {
       try {
@@ -907,8 +1086,10 @@
             path: s.path_location,
             smb_username: s.smb_username || '',
             smb_password: s.smb_password || '',
-            has_password: Boolean(s.has_password),
-            sync_status: s.sync_status || ''
+            has_password: Boolean(s.has_smb_password || s.has_password),
+            sync_status: s.sync_status || '',
+            owner_username: s.owner_username || '',
+            is_shared_local: Boolean(s.is_shared_local)
           }));
         }
       } catch (e) {}
@@ -986,14 +1167,38 @@
       document.getElementById('login-modal').classList.remove('hidden');
     }
 
+    function updateSidebarSharedButtonUI() {
+      const btn = document.getElementById('sidebar-shared-toggle-btn');
+      const icon = document.getElementById('sidebar-shared-check-icon');
+      if (!btn || !icon) return;
+      if (includeSharedAlbums) {
+        icon.textContent = '☑️';
+        btn.className = 'text-[10px] px-1.5 py-0.5 rounded border text-emerald-300 border-emerald-500/70 bg-emerald-500/15 hover:border-emerald-400 transition flex items-center gap-0.5 font-semibold';
+      } else {
+        icon.textContent = '☐';
+        btn.className = 'text-[10px] px-1.5 py-0.5 rounded border text-zinc-400 hover:border-emerald-500 transition flex items-center gap-0.5';
+      }
+    }
+
+    async function toggleSidebarSharedFilter() {
+      includeSharedAlbums = !includeSharedAlbums;
+      updateSidebarSharedButtonUI();
+      await loadAlbums();
+      await applyFiltersAndPaging(0);
+    }
+
     async function loadAlbums() {
       if (isSharedReadOnlyMode) return;
       try {
-        const res = await fetch('/api/media/albums');
+        const res = await fetch(`/api/media/albums?include_shared=${includeSharedAlbums ? '1' : '0'}`);
         const data = await res.json();
         allAlbums = (Array.isArray(data) ? data : []).map(a => {
           if (typeof a === 'string') {
-            return { album_name: a, min_date: '', max_date: '', count: 0, is_virtual: false, is_smb: false, sync_status: '', source_id: null };
+            return {
+              album_name: a, min_date: '', max_date: '', count: 0,
+              is_virtual: false, is_smb: false, sync_status: '', source_id: null,
+              owner_username: '', is_shared_local: false, is_shared_from_other: false, is_subfolder: false
+            };
           }
           return {
             album_name: a.album_name,
@@ -1003,7 +1208,11 @@
             is_virtual: Boolean(a.is_virtual),
             is_smb: Boolean(a.is_smb),
             sync_status: a.sync_status || '',
-            source_id: a.source_id || null
+            source_id: a.source_id || null,
+            owner_username: a.owner_username || '',
+            is_shared_local: Boolean(a.is_shared_local),
+            is_shared_from_other: Boolean(a.is_shared_from_other),
+            is_subfolder: Boolean(a.is_subfolder)
           };
         });
         renderAlbumsList();
@@ -1095,22 +1304,34 @@
       const allActive = currentAlbum === null ? 'bg-blue-600/20 text-blue-400 font-semibold' : 'hover:bg-zinc-800/40';
       const albumsHtml = filtered.map(a => {
         const isActive = currentAlbum === a.album_name ? 'bg-blue-600/20 text-blue-400 font-semibold' : 'hover:bg-zinc-800/40';
-        const safeName = a.album_name.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        const encName = encodeURIComponent(a.album_name);
         const dateHint = a.min_date ? a.min_date.split(' ')[0] : '';
         const icon = a.is_virtual ? '🗂️' : (a.is_smb ? '🌐' : '📁');
-        const badge = a.is_virtual
-          ? `<span class="text-[8px] px-1 py-0.2 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 shrink-0">Virtual</span>`
-          : (a.is_smb ? `<span class="text-[8px] px-1 py-0.2 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 shrink-0">SMB</span>` : '');
+        const badgeParts = [];
+        if (a.is_virtual) {
+          badgeParts.push(`<span class="text-[8px] px-1 py-0.2 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 shrink-0">Virtual</span>`);
+        } else if (a.is_smb) {
+          badgeParts.push(`<span class="text-[8px] px-1 py-0.2 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 shrink-0">SMB</span>`);
+        }
+        if (a.is_shared_from_other && a.owner_username) {
+          badgeParts.push(`<span class="text-[8px] px-1 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0">👥 ${a.owner_username}</span>`);
+        } else if (a.is_shared_local) {
+          badgeParts.push(`<span class="text-[8px] px-1 py-0.2 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 shrink-0" title="Shared with local users">👥</span>`);
+        }
+        const badge = badgeParts.join(' ');
         const tip = (a.sync_status || a.album_name).replace(/"/g, '&quot;');
+        const htmlSafeAlbum = a.album_name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         return `
           <div class="group flex items-center justify-between rounded-lg transition ${isActive}" title="${tip}">
-            <button onclick="selectAlbum('${safeName}')" class="flex-1 text-left px-2 py-1.5 flex items-center justify-between gap-1.5 min-w-0">
-              <span class="truncate flex items-center gap-1"><span>${icon}</span> <span class="truncate">${a.album_name}</span> ${badge}</span>
+            <button onclick="selectAlbum(decodeURIComponent('${encName}'))" class="flex-1 text-left px-2 py-1.5 flex items-center justify-between gap-1.5 min-w-0">
+              <span class="truncate flex items-center gap-1"><span>${icon}</span> <span class="truncate">${htmlSafeAlbum}</span> ${badge}</span>
               <span class="text-[9px] text-zinc-500 font-mono shrink-0">${dateHint || (a.count + ' items')}</span>
             </button>
             <div class="hidden group-hover:flex items-center gap-0.5 pr-1.5 shrink-0">
-              <button onclick="event.stopPropagation(); openShareModal('${safeName}')" title="Share Album with 4-Digit Passcode" class="p-1 text-[10px] text-emerald-400 hover:bg-emerald-500/20 rounded">🔗</button>
-              <button onclick="event.stopPropagation(); removeAlbumFromCatalog('${safeName}', ${Boolean(a.is_virtual)}, ${a.source_id || 'null'})" title="Remove Album" class="p-1 text-[10px] text-rose-400 hover:bg-rose-500/20 rounded">🗑️</button>
+              <button onclick="event.stopPropagation(); openShareModal(decodeURIComponent('${encName}'))" title="Share Album with 4-Digit Passcode" class="p-1 text-[10px] text-emerald-400 hover:bg-emerald-500/20 rounded">🔗</button>
+              ${!a.is_shared_from_other ? `
+                <button onclick="event.stopPropagation(); removeAlbumFromCatalog(decodeURIComponent('${encName}'), ${Boolean(a.is_virtual)}, ${a.source_id || 'null'})" title="Remove Album" class="p-1 text-[10px] text-rose-400 hover:bg-rose-500/20 rounded">🗑️</button>
+              ` : ''}
             </div>
           </div>
         `;
@@ -1129,13 +1350,13 @@
           await fetch('/api/albums/virtual/delete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ album_name: albumName })
+            body: JSON.stringify({ album_name: albumName, include_shared: includeSharedAlbums })
           });
         } else {
           await fetch('/api/config/delete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: sourceId, album_name: albumName })
+            body: JSON.stringify({ id: sourceId, album_name: albumName, include_shared: includeSharedAlbums })
           });
           await loadSourcesConfig();
         }
@@ -1157,6 +1378,7 @@
       const toInp = document.getElementById('date-to');
       if (fromInp) fromInp.value = '';
       if (toInp) toInp.value = '';
+      hasInitialGlobeAutoFit = false;
       renderAlbumsList();
       applyFiltersAndPaging(0);
     }
@@ -1166,22 +1388,60 @@
       applyFiltersAndPaging(0);
     }
 
+    // Fix 1(a): Pre-load all GPS coordinates in advance for Globe View
+    async function preloadGlobeMedia() {
+      if (isSharedReadOnlyMode) {
+        globeMediaItems = mediaItems.filter(m => m.latitude != null && m.longitude != null);
+        updateGlobeHudCount();
+        if (map || fallbackGlobeRedraw) renderGlobePins();
+        return;
+      }
+      const from = document.getElementById('date-from').value;
+      const to = document.getElementById('date-to').value;
+      let url = `/api/media/globe?include_shared=${includeSharedAlbums ? '1' : '0'}&`;
+      if (searchQuery) url += `search=${encodeURIComponent(searchQuery)}&`;
+      if (from) url += `date_from=${from}&`;
+      if (to) url += `date_to=${to}&`;
+      if (currentAlbum) url += `album=${encodeURIComponent(currentAlbum)}&`;
+
+      try {
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const data = await res.json();
+        globeMediaItems = Array.isArray(data.items) ? data.items : [];
+        updateGlobeHudCount();
+        if (map || fallbackGlobeRedraw) {
+          renderGlobePins();
+          if (!hasInitialGlobeAutoFit && globeMediaItems.length > 0) {
+            hasInitialGlobeAutoFit = true;
+            fitGlobeToAllPhotos();
+          }
+        }
+      } catch (e) {}
+    }
+
     async function applyFiltersAndPaging(newOffset = 0) {
       if (isSharedReadOnlyMode) {
+        globeMediaItems = mediaItems.filter(m => m.latitude != null && m.longitude != null);
         renderGrid();
         renderPagination();
-        if (map) renderGlobePins();
+        if (map || fallbackGlobeRedraw) renderGlobePins();
         return;
       }
       offset = newOffset;
       const from = document.getElementById('date-from').value;
       const to = document.getElementById('date-to').value;
 
-      let url = `/api/media?limit=${limit}&offset=${offset}&sort=${encodeURIComponent(currentSortMode)}&`;
+      let url = `/api/media?limit=${limit}&offset=${offset}&sort=${encodeURIComponent(currentSortMode)}&include_shared=${includeSharedAlbums ? '1' : '0'}&`;
       if (searchQuery) url += `search=${encodeURIComponent(searchQuery)}&`;
       if (from) url += `date_from=${from}&`;
       if (to) url += `date_to=${to}&`;
       if (currentAlbum) url += `album=${encodeURIComponent(currentAlbum)}&`;
+
+      // Pre-load GPS metadata in parallel so Globe View is always ready immediately
+      if (newOffset === 0 || globeMediaItems.length === 0) {
+        preloadGlobeMedia();
+      }
 
       try {
         const res = await fetch(url);
@@ -1192,7 +1452,7 @@
         updateDateSliderBounds(data.album_min_date || '', data.album_max_date || '');
         renderGrid();
         renderPagination();
-        if (map) renderGlobePins();
+        if (map || fallbackGlobeRedraw) renderGlobePins();
       } catch (e) {}
     }
 
@@ -1722,13 +1982,17 @@
       `;
     }
 
-    function openPhotoViewer(index) {
+    // Items currently shown in the lightbox (grid page OR globe cluster)
+    let activeViewerItems = [];
+
+    function openPhotoViewer(index, sourceItems = null) {
       if (!window.PhotoSwipe) {
-        setTimeout(() => openPhotoViewer(index), 100);
+        setTimeout(() => openPhotoViewer(index, sourceItems), 100);
         return;
       }
       isCaptionEditMode = false;
-      const pswpItems = mediaItems.map(m => ({
+      activeViewerItems = Array.isArray(sourceItems) && sourceItems.length > 0 ? sourceItems : mediaItems;
+      const pswpItems = activeViewerItems.map(m => ({
         src: getStreamUrl('file', m.id),
         msrc: getStreamUrl('thumb', m.id),
         width: m.width || 1200,
@@ -1921,8 +2185,10 @@
       if (activeLightboxInstance && activeLightboxInstance.currSlide && activeLightboxInstance.currSlide.data) {
         activeLightboxInstance.currSlide.data.caption = text;
       }
-      const item = mediaItems.find(m => m.id === id);
-      if (item) item.caption = text;
+      [mediaItems, globeMediaItems, activeViewerItems].forEach(list => {
+        const item = (list || []).find(m => m.id === id);
+        if (item) item.caption = text;
+      });
       isCaptionEditMode = false;
       if (renderActiveCaptionPanel) renderActiveCaptionPanel();
     }
@@ -2031,7 +2297,13 @@
         map.on('load', () => {
           map.resize();
           renderGlobePins();
+          if (!hasInitialGlobeAutoFit && globeMediaItems.length > 0) {
+            hasInitialGlobeAutoFit = true;
+            fitGlobeToAllPhotos();
+          }
         });
+        // Fix 1(b): Re-cluster after zoom/pan like iOS Photos map (moveend also fires after zoom)
+        map.on('moveend', () => renderGlobePins());
         map.on('error', (e) => {
           if (e && e.error && String(e.error).toLowerCase().includes('webgl')) {
             renderCanvasGlobeFallback();
@@ -2142,20 +2414,36 @@
         const pinsLayer = document.getElementById('fallback-pins-layer');
         if (pinsLayer) {
           pinsLayer.innerHTML = '';
-          mediaItems.forEach((i, idx) => {
+          // Project all visible GPS points, then cluster in screen space (iOS-style)
+          const projected = [];
+          globeMediaItems.forEach(i => {
             if (i.latitude == null || i.longitude == null) return;
             const p = project(Number(i.longitude), Number(i.latitude));
             if (!p) return;
-            const el = document.createElement('img');
-            el.src = getStreamUrl('thumb', i.id);
-            el.loading = 'lazy';
-            el.decoding = 'async';
-            el.className = 'globe-marker-pin pointer-events-auto';
-            el.title = `${i.album_name}${i.caption ? ' — ' + i.caption : ''}`;
+            projected.push({ item: i, x: p[0], y: p[1] });
+          });
+          const clusters = clusterScreenPoints(projected, 64);
+          updateGlobeHudClusters(clusters.length);
+          clusters.forEach(cl => {
+            const el = buildClusterMarkerElement(cl.items);
+            el.classList.add('pointer-events-auto');
             el.style.position = 'absolute';
-            el.style.left = `${p[0] - 22}px`;
-            el.style.top = `${p[1] - 22}px`;
-            el.addEventListener('click', () => openPhotoViewer(idx));
+            el.style.left = `${cl.x - 28}px`;
+            el.style.top = `${cl.y - 28}px`;
+            el.addEventListener('click', (e) => {
+              e.stopPropagation();
+              if (cl.items.length === 1) {
+                openPhotoViewer(0, cl.items);
+              } else {
+                openGlobeClusterDrawer(cl.items, () => {
+                  R = Math.min(Math.min(w, h) * 0.85, R * 1.8);
+                  const lon = cl.items.reduce((s, m) => s + Number(m.longitude), 0) / cl.items.length;
+                  const lat = cl.items.reduce((s, m) => s + Number(m.latitude), 0) / cl.items.length;
+                  centerLon = lon; centerLat = Math.max(-75, Math.min(75, lat));
+                  draw();
+                });
+              }
+            });
             pinsLayer.appendChild(el);
           });
         }
@@ -2185,27 +2473,177 @@
       });
     }
 
+    // ===== Fix 1(b): iOS Photos-style location clustering =====
+    // Greedy screen-space clustering: points within `radiusPx` of a cluster centre merge into it.
+    function clusterScreenPoints(points, radiusPx) {
+      const clusters = [];
+      const r2 = radiusPx * radiusPx;
+      points.forEach(pt => {
+        let target = null;
+        for (const cl of clusters) {
+          const dx = cl.x - pt.x, dy = cl.y - pt.y;
+          if (dx * dx + dy * dy <= r2) { target = cl; break; }
+        }
+        if (target) {
+          target.items.push(pt.item);
+          const n = target.items.length;
+          target.x = target.x + (pt.x - target.x) / n;
+          target.y = target.y + (pt.y - target.y) / n;
+        } else {
+          clusters.push({ x: pt.x, y: pt.y, items: [pt.item] });
+        }
+      });
+      return clusters;
+    }
+
+    function escapeHtml(s) {
+      return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function clusterPlaceLabel(items) {
+      const counts = {};
+      items.forEach(m => {
+        const c = (m.caption || '').trim();
+        if (!c || c.length > 48) return;
+        counts[c] = (counts[c] || 0) + 1;
+      });
+      let best = '', bestN = 0;
+      Object.keys(counts).forEach(k => { if (counts[k] > bestN) { best = k; bestN = counts[k]; } });
+      return best;
+    }
+
+    function buildClusterMarkerElement(items) {
+      const cover = items[0];
+      const el = document.createElement('div');
+      el.className = 'ios-cluster-pin';
+      const label = clusterPlaceLabel(items);
+      el.title = items.length > 1
+        ? `${items.length} photos${label ? ' — ' + label : ''} (click to view)`
+        : `${cover.album_name || ''}${cover.caption ? ' — ' + cover.caption : ''}`;
+      el.innerHTML = `
+        ${items.length > 1 ? '<div class="ios-cluster-stack-back"></div>' : ''}
+        <div class="ios-cluster-card"><img src="${getStreamUrl('thumb', cover.id)}" loading="lazy" decoding="async" /></div>
+        ${items.length > 1 ? `<div class="ios-cluster-badge">${items.length > 999 ? '999+' : items.length}</div>` : ''}
+        ${label ? `<div class="ios-cluster-label">${escapeHtml(label)}</div>` : ''}
+      `;
+      return el;
+    }
+
+    function updateGlobeHudCount() {
+      const el = document.getElementById('globe-hud-count');
+      if (el) el.textContent = `${globeMediaItems.length} GPS Photo${globeMediaItems.length === 1 ? '' : 's'} Pre-loaded`;
+    }
+
+    function updateGlobeHudClusters(n) {
+      const el = document.getElementById('globe-hud-clusters');
+      if (el) el.textContent = `${n} location group${n === 1 ? '' : 's'} on screen • zoom in to expand`;
+    }
+
+    function fitGlobeToAllPhotos() {
+      if (!map || globeMediaItems.length === 0) return;
+      let minLon = 180, maxLon = -180, minLat = 90, maxLat = -90;
+      globeMediaItems.forEach(m => {
+        const lon = Number(m.longitude), lat = Number(m.latitude);
+        if (lon < minLon) minLon = lon; if (lon > maxLon) maxLon = lon;
+        if (lat < minLat) minLat = lat; if (lat > maxLat) maxLat = lat;
+      });
+      try {
+        if (maxLon - minLon < 0.01 && maxLat - minLat < 0.01) {
+          map.flyTo({ center: [minLon, minLat], zoom: 13 });
+        } else {
+          map.fitBounds([[minLon, minLat], [maxLon, maxLat]], { padding: 90, maxZoom: 14, duration: 900 });
+        }
+      } catch (e) {}
+    }
+
+    let globeDrawerItems = [];
+
+    function openGlobeClusterDrawer(items, zoomFn) {
+      globeDrawerItems = items.slice();
+      const drawer = document.getElementById('globe-cluster-drawer');
+      const grid = document.getElementById('globe-cluster-grid');
+      const title = document.getElementById('globe-cluster-title');
+      const sub = document.getElementById('globe-cluster-subtitle');
+      const zoomBtn = document.getElementById('globe-cluster-zoom-btn');
+      if (!drawer || !grid) return;
+      const label = clusterPlaceLabel(items);
+      title.textContent = `📍 ${label || 'Nearby Location'} — ${items.length} photos`;
+      const dates = items.map(m => (m.date_taken || '').split(' ')[0]).filter(Boolean).sort();
+      sub.textContent = dates.length ? `${dates[0]} → ${dates[dates.length - 1]} • Click a photo to open full resolution` : 'Click a photo to open full resolution';
+      grid.innerHTML = items.map((m, idx) => `
+        <button onclick="openPhotoViewer(${idx}, globeDrawerItems)" class="aspect-square rounded-lg overflow-hidden border border-zinc-700 hover:border-blue-500 transition bg-black/40">
+          <img src="${getStreamUrl('thumb', m.id)}" loading="lazy" decoding="async" class="w-full h-full object-cover" />
+        </button>
+      `).join('');
+      zoomBtn.onclick = () => { if (zoomFn) zoomFn(); closeGlobeClusterDrawer(); };
+      drawer.classList.remove('hidden');
+      drawer.classList.add('flex');
+    }
+
+    function closeGlobeClusterDrawer() {
+      const drawer = document.getElementById('globe-cluster-drawer');
+      if (drawer) { drawer.classList.add('hidden'); drawer.classList.remove('flex'); }
+    }
+
     function renderGlobePins() {
+      updateGlobeHudCount();
       if (fallbackGlobeRedraw) {
         fallbackGlobeRedraw();
       }
-      if (!map) return;
+      if (!map || fallbackGlobeRedraw) return;
       markers.forEach(m => m.remove());
       markers = [];
-      mediaItems.forEach((i, idx) => {
+
+      // Project to screen, keep only points on the visible hemisphere / viewport (with margin)
+      const canvas = map.getCanvas();
+      const W = canvas.clientWidth, H = canvas.clientHeight;
+      const center = map.getCenter();
+      const projected = [];
+      globeMediaItems.forEach(i => {
         if (i.latitude == null || i.longitude == null) return;
-        const el = document.createElement('img');
-        el.src = getStreamUrl('thumb', i.id);
-        el.loading = 'lazy';
-        el.decoding = 'async';
-        el.className = 'globe-marker-pin';
-        el.title = `${i.album_name}${i.caption ? ' — ' + i.caption : ''}`;
+        const lon = Number(i.longitude), lat = Number(i.latitude);
+        // Skip back side of the globe (angular distance > ~85° from centre)
+        const toRad = Math.PI / 180;
+        const cosD = Math.sin(lat * toRad) * Math.sin(center.lat * toRad) +
+                     Math.cos(lat * toRad) * Math.cos(center.lat * toRad) * Math.cos((lon - center.lng) * toRad);
+        if (map.getZoom() < 5 && cosD < 0.08) return;
+        const p = map.project([lon, lat]);
+        if (p.x < -80 || p.y < -80 || p.x > W + 80 || p.y > H + 80) return;
+        projected.push({ item: i, x: p.x, y: p.y });
+      });
+
+      // At max zoom, very close points still stack: shrink radius only a bit so the cluster stays clickable
+      const radius = map.getZoom() >= 17 ? 36 : 64;
+      const clusters = clusterScreenPoints(projected, radius);
+      updateGlobeHudClusters(clusters.length);
+
+      clusters.forEach(cl => {
+        const el = buildClusterMarkerElement(cl.items);
+        const lngLat = map.unproject([cl.x, cl.y]);
         el.addEventListener('click', (e) => {
           e.stopPropagation();
-          openPhotoViewer(idx);
+          if (cl.items.length === 1) {
+            openPhotoViewer(0, cl.items);
+            return;
+          }
+          const zoomIn = () => {
+            let minLon = 180, maxLon = -180, minLat = 90, maxLat = -90;
+            cl.items.forEach(m => {
+              const lo = Number(m.longitude), la = Number(m.latitude);
+              if (lo < minLon) minLon = lo; if (lo > maxLon) maxLon = lo;
+              if (la < minLat) minLat = la; if (la > maxLat) maxLat = la;
+            });
+            if (maxLon - minLon < 0.0005 && maxLat - minLat < 0.0005) {
+              map.flyTo({ center: [minLon, minLat], zoom: Math.max(map.getZoom() + 2, 16) });
+            } else {
+              map.fitBounds([[minLon, minLat], [maxLon, maxLat]], { padding: 100, maxZoom: 18, duration: 800 });
+            }
+          };
+          // iOS behaviour: open the cluster's photos; "Zoom In Here" splits the group on the map
+          openGlobeClusterDrawer(cl.items, zoomIn);
         });
         const marker = new maplibregl.Marker({ element: el })
-          .setLngLat([Number(i.longitude), Number(i.latitude)])
+          .setLngLat(lngLat)
           .addTo(map);
         markers.push(marker);
       });
@@ -2263,7 +2701,7 @@
     }
 
     function collapseAllSettingsSections() {
-      ['security', 'sources', 'reload'].forEach(key => {
+      ['security', 'sources', 'shared', 'reload'].forEach(key => {
         const body = document.getElementById(`settings-sec-${key}`);
         const chev = document.getElementById(`settings-chevron-${key}`);
         if (body) body.classList.add('hidden');
@@ -2278,6 +2716,186 @@
       const isHidden = body.classList.contains('hidden');
       body.classList.toggle('hidden', !isHidden);
       if (chev) chev.textContent = isHidden ? '▾' : '▸';
+      if (isHidden && key === 'shared') loadSettingsSharedAlbums();
+      if (isHidden && key === 'security') loadLocalUsers();
+    }
+
+    // ===== New 1: Local multi-user management =====
+    async function loadLocalUsers() {
+      const c = document.getElementById('local-users-list');
+      if (!c) return;
+      try {
+        const res = await fetch('/api/users');
+        const list = await res.json();
+        if (!Array.isArray(list) || list.length === 0) {
+          c.innerHTML = `<div class="text-[11px] text-zinc-500 italic">No local users.</div>`;
+          return;
+        }
+        c.innerHTML = list.map(u => `
+          <div style="background-color: var(--bg-input); border-color: var(--border-color);" class="border rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2 min-w-0">
+              <span>${u.is_current ? '🟢' : '👤'}</span>
+              <span class="font-semibold text-xs truncate">${escapeHtml(u.username)}</span>
+              ${u.is_current ? '<span class="text-[10px] px-1.5 rounded bg-blue-500/20 text-blue-300">You</span>' : ''}
+              <span class="text-[10px] text-zinc-500">${u.source_count ?? 0} folder(s) • ${u.shared_source_count ?? 0} shared</span>
+            </div>
+            ${!u.is_current ? `<button onclick="deleteLocalUser(decodeURIComponent('${encodeURIComponent(u.username)}'))" class="px-2 py-1 bg-rose-500/20 hover:bg-rose-600 text-rose-300 hover:text-white rounded text-[10px]">🗑️ Remove</button>` : ''}
+          </div>
+        `).join('');
+      } catch (e) {}
+    }
+
+    async function addLocalUserAccount() {
+      const uEl = document.getElementById('new-local-user-name');
+      const pEl = document.getElementById('new-local-user-pass');
+      const msg = document.getElementById('local-user-status-msg');
+      const u = (uEl.value || '').trim();
+      const p = pEl.value || '';
+      if (!u || p.length < 4) {
+        msg.className = 'text-xs text-rose-400 font-medium';
+        msg.textContent = 'Username and password (min 4 chars) required.';
+        return;
+      }
+      try {
+        const res = await fetch('/api/users/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: encodeTransportSecret(u), password: encodeTransportSecret(p) })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          msg.className = 'text-xs text-emerald-400 font-medium';
+          msg.textContent = `✓ User "${u}" added.`;
+          uEl.value = ''; pEl.value = '';
+          loadLocalUsers();
+        } else {
+          msg.className = 'text-xs text-rose-400 font-medium';
+          msg.textContent = data.error || 'Failed to add user.';
+        }
+      } catch (e) {
+        msg.className = 'text-xs text-rose-400 font-medium';
+        msg.textContent = 'Network error adding user.';
+      }
+    }
+
+    async function deleteLocalUser(username) {
+      if (!confirm(`Remove local user "${username}"? Their folders remain in the database but become inaccessible to them.`)) return;
+      await fetch('/api/users/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username })
+      });
+      loadLocalUsers();
+    }
+
+    // ===== New 3: Settings -> Shared Album (most recent 20) =====
+    async function loadSettingsSharedAlbums() {
+      const c = document.getElementById('settings-shared-albums-list');
+      const badge = document.getElementById('settings-shared-count-badge');
+      if (!c) return;
+      try {
+        const res = await fetch('/api/share/list');
+        const list = await res.json();
+        if (badge) badge.textContent = `${Array.isArray(list) ? list.length : 0} / Most Recent 20`;
+        if (!Array.isArray(list) || list.length === 0) {
+          c.innerHTML = `<div class="text-[11px] text-zinc-500 italic py-2">No shared album links yet. Use 🔗 Share on any album or selection.</div>`;
+          return;
+        }
+        c.innerHTML = list.map(s => {
+          const fullUrl = `${window.location.origin}/?share=${s.share_token}`;
+          return `
+            <div style="background-color: var(--bg-input); border-color: var(--border-color);" class="border rounded-xl p-3 flex items-center justify-between gap-3">
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-bold text-xs truncate">${escapeHtml(s.album_name)}</span>
+                  <span class="text-[10px] px-1.5 rounded bg-blue-500/20 text-blue-300 font-mono">${s.media_count} items</span>
+                  <span class="text-[10px] text-zinc-500">${escapeHtml(s.created_at || '')}</span>
+                </div>
+                <div class="text-[10px] text-zinc-400 font-mono truncate mt-0.5">${fullUrl}</div>
+              </div>
+              <div class="flex items-center gap-1.5 shrink-0">
+                <span class="px-2 py-1 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 font-mono text-xs font-bold tracking-[0.2em]">${escapeHtml(s.passcode)}</span>
+                <button onclick="copyTextWithFeedback('${fullUrl}', this)" class="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded text-[10px]">📋 Link</button>
+                <button onclick="copyTextWithFeedback('${escapeHtml(s.passcode)}', this)" class="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded text-[10px]">📋 Code</button>
+                <button onclick="revokeSettingsShare('${s.share_token}')" class="px-2 py-1 bg-rose-500/20 hover:bg-rose-600 text-rose-300 hover:text-white rounded text-[10px]">🗑️ Revoke</button>
+              </div>
+            </div>
+          `;
+        }).join('');
+      } catch (e) {}
+    }
+
+    function copyTextWithFeedback(text, btn) {
+      try { navigator.clipboard.writeText(text); } catch (e) {}
+      const orig = btn.textContent;
+      btn.textContent = '✓ Copied';
+      setTimeout(() => { btn.textContent = orig; }, 1300);
+    }
+
+    async function revokeSettingsShare(token) {
+      await fetch('/api/share/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ share_token: token })
+      });
+      loadSettingsSharedAlbums();
+    }
+
+    // ===== New 4: Tasking in Running (poll; auto-hide when done) =====
+    let tasksPollTimer = null;
+
+    async function pollRunningTasks() {
+      const section = document.getElementById('settings-running-tasks-section');
+      const list = document.getElementById('settings-running-tasks-list');
+      if (!section || !list) return;
+      try {
+        const res = await fetch('/api/tasks/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        const running = Array.isArray(data.running_tasks) ? data.running_tasks : [];
+        if (running.length === 0) {
+          section.classList.add('hidden');
+          list.innerHTML = '';
+          if (tasksPollTimer) { clearInterval(tasksPollTimer); tasksPollTimer = null; }
+          return;
+        }
+        section.classList.remove('hidden');
+        list.innerHTML = running.map(t => {
+          const pct = Math.max(0, Math.min(100, Number(t.percent) || 0));
+          return `
+            <div class="space-y-1.5">
+              <div class="flex items-center justify-between text-xs">
+                <span class="font-semibold text-zinc-200">${escapeHtml(t.name)}</span>
+                <span class="font-mono text-blue-300">${t.processed || 0} / ${t.total || 0} • ${pct}%</span>
+              </div>
+              <div class="w-full h-2 rounded-full bg-zinc-800 overflow-hidden">
+                <div class="h-full bg-gradient-to-r from-blue-600 to-emerald-500 transition-all duration-500" style="width: ${pct}%"></div>
+              </div>
+              <div class="text-[11px] text-zinc-400">${escapeHtml(t.message || '')}</div>
+            </div>
+          `;
+        }).join('');
+        if (!tasksPollTimer) tasksPollTimer = setInterval(pollRunningTasks, 1500);
+      } catch (e) {}
+    }
+
+    async function triggerAutoGeoCaptionTask() {
+      const syncMsg = document.getElementById('sync-status-msg');
+      try {
+        const res = await fetch('/api/tasks/geo-caption', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ force: false })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (syncMsg) {
+          syncMsg.className = 'text-xs text-blue-400 font-medium';
+          syncMsg.textContent = data.status === 'already_running'
+            ? '⏳ Geo-caption task is already running...'
+            : '🌍 Auto Geo-Caption task started in background.';
+        }
+      } catch (e) {}
+      setTimeout(pollRunningTasks, 300);
     }
 
     async function openSettingsPage() {
@@ -2293,11 +2911,13 @@
       document.getElementById('settings-page').classList.remove('hidden');
       document.getElementById('settings-page').classList.add('flex');
       renderSettings();
+      pollRunningTasks();
     }
 
     function closeSettingsPage() {
       document.getElementById('settings-page').classList.add('hidden');
       document.getElementById('settings-page').classList.remove('flex');
+      if (tasksPollTimer) { clearInterval(tasksPollTimer); tasksPollTimer = null; }
     }
 
     function renderSettings() {
@@ -2343,7 +2963,13 @@
                        style="background-color: var(--bg-panel); border-color: var(--border-color);"
                        class="border rounded-lg px-2.5 py-1 text-[11px] w-44 focus:outline-none focus:border-blue-500" />
               </div>
-              <span id="source-row-status-${idx}" class="text-[11px] font-medium ${stColor}">${st ? (isErr ? '⚠️ ' : '✓ ') + st : ''}</span>
+              <label class="flex items-center gap-1.5 text-[11px] cursor-pointer shrink-0 ${s.is_shared_local ? 'text-emerald-300' : 'text-zinc-400'}" title="Checked = other local users can view this folder via the sidebar 👥 Shared toggle. Unchecked = private.">
+                <input type="checkbox" ${s.is_shared_local ? 'checked' : ''}
+                       onchange="sourceConfigurations[${idx}].is_shared_local = this.checked; renderSettings();"
+                       class="accent-emerald-500 rounded" />
+                <span>👥 Share with other local users</span>
+              </label>
+              <span id="source-row-status-${idx}" class="text-[11px] font-medium ${stColor}">${st ? (isErr ? '⚠️ ' : '✓ ') + escapeHtml(st) : ''}</span>
             </div>
           </div>
         `;
@@ -2391,7 +3017,8 @@
         path: `//NAS_Synology/NAS_D02/Family-Memoria-Media`,
         smb_username: '',
         smb_password: '',
-        sync_status: ''
+        sync_status: '',
+        is_shared_local: false
       });
       renderSettings();
     }
@@ -2439,7 +3066,8 @@
             album_name: s.name,
             path_location: s.path,
             smb_username: encodeTransportSecret(s.smb_username || ''),
-            smb_password: encodeTransportSecret(s.smb_password || '')
+            smb_password: encodeTransportSecret(s.smb_password || ''),
+            is_shared_local: Boolean(s.is_shared_local)
           })))
         });
         const data = await res.json().catch(() => ({}));
@@ -2447,6 +3075,7 @@
         renderSettings();
         await loadAlbums();
         await applyFiltersAndPaging(0);
+        setTimeout(pollRunningTasks, 200);
         if (res.ok) {
           const errs = Array.isArray(data.errors) ? data.errors : [];
           if (errs.length > 0) {
@@ -2491,8 +3120,10 @@
               album_name: s.name,
               path_location: s.path,
               smb_username: encodeTransportSecret(s.smb_username || ''),
-              smb_password: encodeTransportSecret(s.smb_password || '')
-            }))
+              smb_password: encodeTransportSecret(s.smb_password || ''),
+              is_shared_local: Boolean(s.is_shared_local)
+            })),
+            include_shared: includeSharedAlbums
           })
         });
         const data = await res.json().catch(() => ({}));
@@ -2500,6 +3131,7 @@
         renderSettings();
         await loadAlbums();
         await applyFiltersAndPaging(0);
+        setTimeout(pollRunningTasks, 200);
 
         if (!res.ok) {
           const errText = data.error || `HTTP ${res.status}: Failed to reload media index.`;
