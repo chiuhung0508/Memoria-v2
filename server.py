@@ -412,7 +412,7 @@ def extract_full_metadata(local_file_path, display_filename=None, fallback_dt=No
     alt_val = _to_float(gps_tags.get("GPSAltitude"))
     alt_ref = gps_tags.get("GPSAltitudeRef", 0)
     if alt_val is not None:
-        altitude_str = f"{alt_val:.1f} m {'Below' if alt_ref in (1, b'\\x01') else 'Above'} Sea Level"
+        altitude_str = f"{alt_val:.1f} m {'Below' if alt_ref in (1, b'\x01') else 'Above'} Sea Level"
     else:
         altitude_str = "—"
 
@@ -1127,6 +1127,7 @@ def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=60.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 60000;")
+    conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
 
@@ -1611,6 +1612,10 @@ def init_db():
 
     conn.commit()
 
+    # Clean up any orphaned virtual album items left over from before foreign_keys=ON
+    c.execute("DELETE FROM virtual_album_items WHERE media_id NOT IN (SELECT id FROM media)")
+    conn.commit()
+
     # Remap any existing subfolder items for all configured sources
     for srow in c.execute("SELECT id, album_name, path_location FROM sources_config").fetchall():
         remap_existing_subfolders_for_source(conn, srow["id"], srow["album_name"], srow["path_location"])
@@ -1687,13 +1692,6 @@ def sync_all_sources(conn, owner_filter=None):
                                     (full_p,)
                                 ).fetchone()
                                 if existing_meta and existing_meta["width"] and existing_meta["exif_json"]:
-                                    dt = existing_meta["date_taken"]
-                                    lat = existing_meta["latitude"]
-                                    lon = existing_meta["longitude"]
-                                    cap = existing_meta["caption"] or ""
-                                    w = existing_meta["width"]
-                                    h = existing_meta["height"]
-                                    ex_json = existing_meta["exif_json"]
                                     if existing_meta["album_name"] != target_album:
                                         with DB_WRITE_LOCK:
                                             conn.execute(
@@ -1712,13 +1710,13 @@ def sync_all_sources(conn, owner_filter=None):
                                         cap = reverse_geocode_lat_lon(lat, lon, conn)
                                     ex_json = json.dumps(exif_dict, ensure_ascii=False)
 
-                                with DB_WRITE_LOCK:
-                                    cur = conn.execute("""
-                                        INSERT OR IGNORE INTO media (source_id, album_name, file_path, file_type, date_taken, latitude, longitude, caption, width, height, exif_json)
-                                        VALUES (?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?)
-                                    """, (src["id"], target_album, full_p, dt, lat, lon, cap, w, h, ex_json))
-                                    if cur.rowcount > 0:
-                                        added_count += 1
+                                    with DB_WRITE_LOCK:
+                                        cur = conn.execute("""
+                                            INSERT OR IGNORE INTO media (source_id, album_name, file_path, file_type, date_taken, latitude, longitude, caption, width, height, exif_json)
+                                            VALUES (?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?)
+                                        """, (src["id"], target_album, full_p, dt, lat, lon, cap, w, h, ex_json))
+                                        if cur.rowcount > 0:
+                                            added_count += 1
                     status_msg = f"OK ({file_total} local files indexed)"
                     with DB_WRITE_LOCK:
                         conn.execute(
@@ -1803,6 +1801,33 @@ def build_user_visibility_sql(conn, current_user, include_shared=False):
         return "1=0", []
 
     return "(" + " OR ".join(clauses) + ")", params
+
+
+def user_can_access_media(conn, current_user, media_id):
+    """
+    Verifies whether the authenticated user (or verified share session) has permission to access media_id.
+    """
+    if not current_user:
+        return False
+    try:
+        mid = int(media_id)
+    except (TypeError, ValueError):
+        return False
+
+    if str(current_user).startswith("share:"):
+        share_tok = str(current_user)[len("share:"):]
+        row = conn.execute("SELECT media_ids FROM sharing_albums WHERE share_token = ?", (share_tok,)).fetchone()
+        if not row:
+            return False
+        try:
+            allowed_ids = json.loads(row["media_ids"] or "[]")
+            return mid in {int(x) for x in allowed_ids}
+        except Exception:
+            return False
+
+    vis_sql, vis_params = build_user_visibility_sql(conn, current_user, include_shared=True)
+    row = conn.execute(f"SELECT 1 FROM media WHERE id = ? AND ({vis_sql}) LIMIT 1", [mid] + list(vis_params)).fetchone()
+    return row is not None
 
 
 def get_all_albums_summary(conn, current_user=None, include_shared=False):
@@ -1977,19 +2002,12 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                 if u:
                     return u
 
-        # 3. Check query param auth_token or share_token
+        # 3. Check query param auth_token (used by <img> stream URLs)
         if query:
             tok = (query.get("auth_token", [""])[0] or "").strip()
             u = self._resolve_session_token(tok)
             if u:
                 return u
-            share_tok = (query.get("share_token", [""])[0] or "").strip()
-            if share_tok:
-                conn = get_db()
-                row = conn.execute("SELECT id FROM sharing_albums WHERE share_token = ?", (share_tok,)).fetchone()
-                conn.close()
-                if row:
-                    return f"share:{share_tok}"
 
         return None
 
@@ -2016,8 +2034,9 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
         rel_file = path.lstrip("/")
         if rel_file == "" or rel_file == "index.html":
             rel_file = "index.html"
-        static_target = os.path.join(DIST_DIR, rel_file)
-        if os.path.exists(static_target) and os.path.isfile(static_target):
+        real_dist = os.path.realpath(DIST_DIR)
+        static_target = os.path.realpath(os.path.join(real_dist, rel_file))
+        if (static_target == real_dist or static_target.startswith(real_dist + os.sep)) and os.path.exists(static_target) and os.path.isfile(static_target):
             mime = "text/html; charset=utf-8"
             if static_target.endswith(".css"):
                 mime = "text/css"
@@ -2078,10 +2097,13 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             })
             return
 
-        # All remaining API GET endpoints require authenticated user credentials
+        # All remaining API GET endpoints & /admin require authenticated user credentials
         auth_user = self.get_authenticated_user(query)
-        if path.startswith("/api/") and not auth_user:
+        if (path.startswith("/api/") or path == "/admin") and not auth_user:
             self.send_json({"error": "Authentication required. Please sign in."}, status=401)
+            return
+        if str(auth_user or "").startswith("share:") and not path.startswith("/api/stream/"):
+            self.send_json({"error": "Shared view only permits streaming linked album media."}, status=403)
             return
 
         include_shared = (query.get("include_shared", ["0"])[0] or "0").strip().lower() in ("1", "true", "yes")
@@ -2240,6 +2262,10 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
         elif path.startswith("/api/stream/thumb/"):
             media_id = path.split("/")[-1]
             conn = get_db()
+            if not user_can_access_media(conn, auth_user, media_id):
+                conn.close()
+                self.send_error(403, "Access denied")
+                return
             row = conn.execute(
                 "SELECT id, file_path, file_type, date_taken, latitude, longitude, width, height FROM media WHERE id = ?",
                 (media_id,)
@@ -2285,6 +2311,10 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
         elif path.startswith("/api/stream/file/"):
             media_id = path.split("/")[-1]
             conn = get_db()
+            if not user_can_access_media(conn, auth_user, media_id):
+                conn.close()
+                self.send_error(403, "Access denied")
+                return
             row = conn.execute(
                 "SELECT id, file_path, file_type, date_taken, latitude, longitude, width, height FROM media WHERE id = ?",
                 (media_id,)
@@ -2309,7 +2339,8 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                     fpath = resolve_source_path(fpath)
 
             if os.path.exists(fpath):
-                mime = "image/jpeg" if fpath.lower().endswith((".jpg", ".jpeg")) else "image/png"
+                ext = os.path.splitext(fpath)[1].lower()
+                mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}.get(ext, "application/octet-stream")
                 with open(fpath, "rb") as f:
                     content = f.read()
                 self.send_response(200)
@@ -2568,9 +2599,12 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
                         "exif": exif_obj
                     })
             conn.close()
+            share_auth_tok = "shs_" + secrets.token_hex(20)
+            ACTIVE_SESSIONS[share_auth_tok] = f"share:{row['share_token']}"
             self.send_json({
                 "status": "ok",
                 "share_token": row["share_token"],
+                "share_auth_token": share_auth_tok,
                 "album_name": row["album_name"],
                 "created_at": row["created_at"],
                 "total": len(items),
@@ -2706,6 +2740,10 @@ class MediaVaultHandler(http.server.SimpleHTTPRequestHandler):
             media_id = payload.get("id")
             caption = payload.get("caption", "")
             conn = get_db()
+            if not user_can_access_media(conn, auth_user, media_id):
+                conn.close()
+                self.send_json({"error": "Access denied for this media item."}, status=403)
+                return
             with DB_WRITE_LOCK:
                 conn.execute("UPDATE media SET caption = ? WHERE id = ?", (caption, media_id))
                 conn.commit()

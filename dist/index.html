@@ -852,6 +852,7 @@
     let selectedMediaIds = new Set();
     let isSharedReadOnlyMode = false;
     let activeShareToken = null;
+    let activeShareAuthToken = '';
 
     // Security & Transport Encryption state
     let authToken = sessionStorage.getItem('auth_token') || localStorage.getItem('memoria_auth_token') || '';
@@ -901,8 +902,8 @@
 
     function getStreamUrl(kind, id) {
       const base = `/api/stream/${kind}/${id}`;
-      if (isSharedReadOnlyMode && activeShareToken) {
-        return `${base}?share_token=${encodeURIComponent(activeShareToken)}`;
+      if (isSharedReadOnlyMode && activeShareAuthToken) {
+        return `${base}?auth_token=${encodeURIComponent(activeShareAuthToken)}`;
       }
       const token = authToken || sessionStorage.getItem('auth_token') || localStorage.getItem('memoria_auth_token') || '';
       if (token) {
@@ -1074,6 +1075,7 @@
     // Fix 1(a): Pre-loaded GPS items for Globe View
     let globeMediaItems = [];
     let hasInitialGlobeAutoFit = false;
+    let lastGlobeFilterKey = null;
 
     async function loadSourcesConfig() {
       try {
@@ -1133,10 +1135,21 @@
         if (res.ok && tok) {
           authToken = tok;
           if (data.transport_key) serverTransportKey = data.transport_key;
-          sessionStorage.setItem('auth', 'true');
+          if (typeof data.demo_active === 'boolean') isDemoActiveOnServer = data.demo_active;
           sessionStorage.setItem('auth_token', tok);
           localStorage.setItem('memoria_auth_token', tok);
           sessionStorage.setItem('username', data.username || u);
+          currentAlbum = null;
+          const activeTitle = document.getElementById('active-album-title');
+          if (activeTitle) activeTitle.innerText = 'All Media';
+          selectedMediaIds.clear();
+          globeMediaItems = [];
+          lastGlobeFilterKey = null;
+          sourceConfigurations = [];
+          hasInitialGlobeAutoFit = false;
+          includeSharedAlbums = false;
+          updateSidebarSharedButtonUI();
+          updateSelectionUI();
           document.getElementById('login-modal').classList.add('hidden');
           errEl.classList.add('hidden');
           loadAlbums();
@@ -1156,10 +1169,18 @@
         await fetch('/api/auth/logout', { method: 'POST' });
       } catch (e) {}
       authToken = '';
-      sessionStorage.removeItem('auth');
       sessionStorage.removeItem('auth_token');
       sessionStorage.removeItem('username');
       localStorage.removeItem('memoria_auth_token');
+      currentAlbum = null;
+      selectedMediaIds.clear();
+      globeMediaItems = [];
+      lastGlobeFilterKey = null;
+      sourceConfigurations = [];
+      hasInitialGlobeAutoFit = false;
+      includeSharedAlbums = false;
+      updateSidebarSharedButtonUI();
+      updateSelectionUI();
       if (!isDemoActiveOnServer) {
         document.getElementById('login-user').value = '';
         document.getElementById('login-pass').value = '';
@@ -1258,10 +1279,6 @@
       updateSortButtonsUI();
       renderAlbumsList();
       applyFiltersAndPaging(0);
-    }
-
-    function cycleAlbumSort() {
-      toggleDateSort();
     }
 
     function handleFolderSearch(val) {
@@ -1438,8 +1455,10 @@
       if (to) url += `date_to=${to}&`;
       if (currentAlbum) url += `album=${encodeURIComponent(currentAlbum)}&`;
 
-      // Pre-load GPS metadata in parallel so Globe View is always ready immediately
-      if (newOffset === 0 || globeMediaItems.length === 0) {
+      // Pre-load GPS metadata only when filters/album/shared-mode change (avoids re-fetching on paging/sorting)
+      const globeFilterKey = `${includeSharedAlbums}|${currentAlbum || ''}|${searchQuery}|${from}|${to}`;
+      if (globeFilterKey !== lastGlobeFilterKey) {
+        lastGlobeFilterKey = globeFilterKey;
         preloadGlobeMedia();
       }
 
@@ -1528,7 +1547,7 @@
 
       if (sel) {
         sel.innerHTML = `<option value="">-- Or type a new Virtual Album name below --</option>` +
-          allAlbums.map(a => `<option value="${a.album_name.replace(/"/g, '&quot;')}">${a.is_virtual ? '🗂️ ' : '📁 '}${a.album_name} (${a.count})</option>`).join('');
+          allAlbums.map(a => `<option value="${escapeHtml(a.album_name)}">${a.is_virtual ? '🗂️ ' : '📁 '}${escapeHtml(a.album_name)} (${a.count})</option>`).join('');
       }
       document.getElementById('new-virtual-album-name').value = '';
       modal.classList.remove('hidden');
@@ -1688,9 +1707,9 @@
             <div style="background-color: var(--bg-input); border-color: var(--border-color);" class="border rounded-xl p-2.5 flex items-center justify-between gap-2">
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2">
-                  <span class="font-bold text-xs truncate">${s.album_name}</span>
+                  <span class="font-bold text-xs truncate">${escapeHtml(s.album_name)}</span>
                   <span class="text-[10px] px-1.5 py-0.2 rounded bg-blue-500/20 text-blue-300 font-mono">${s.media_count} items</span>
-                  <span class="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-mono font-bold">Passcode: ${s.passcode}</span>
+                  <span class="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-mono font-bold">Passcode: ${escapeHtml(s.passcode)}</span>
                 </div>
                 <div class="text-[10px] text-zinc-400 font-mono truncate mt-0.5">${fullUrl}</div>
               </div>
@@ -1753,6 +1772,7 @@
         const data = await res.json();
         if (res.ok) {
           isSharedReadOnlyMode = true;
+          activeShareAuthToken = data.share_auth_token || '';
           mediaItems = data.items || [];
           totalItems = data.total || mediaItems.length;
           currentAlbum = data.album_name;
@@ -1810,8 +1830,8 @@
               </button>
             ` : ''}
             <div class="absolute inset-0 bg-gradient-to-t from-black/85 via-black/25 to-transparent opacity-0 group-hover:opacity-100 transition p-2.5 flex flex-col justify-end text-white pointer-events-none">
-              <span class="font-semibold truncate text-[11px]">${item.album_name}</span>
-              <span class="text-[9px] text-zinc-300">${item.date_taken || ''}</span>
+              <span class="font-semibold truncate text-[11px]">${escapeHtml(item.album_name)}</span>
+              <span class="text-[9px] text-zinc-300">${escapeHtml(item.date_taken || '')}</span>
             </div>
           </div>
         `;
@@ -1895,8 +1915,8 @@
 
       const row = (label, val) => `
         <div class="flex items-start justify-between gap-3 py-1 border-b border-zinc-800/70 last:border-b-0">
-          <span class="text-zinc-400 shrink-0">${label}</span>
-          <span class="text-zinc-100 font-medium text-right break-all">${val || '—'}</span>
+          <span class="text-zinc-400 shrink-0">${escapeHtml(label)}</span>
+          <span class="text-zinc-100 font-medium text-right break-all">${val ? escapeHtml(val) : '—'}</span>
         </div>
       `;
 
@@ -2105,7 +2125,7 @@
                 el.innerHTML = `
                   <div class="flex items-center justify-between border-b border-zinc-700/70 pb-2.5">
                     <div class="flex items-center gap-2 flex-wrap">
-                      <span class="text-xs text-blue-400 font-mono font-semibold">${d.album}</span>
+                      <span class="text-xs text-blue-400 font-mono font-semibold">${escapeHtml(d.album)}</span>
                       ${locBadge}
                     </div>
                     <div class="flex items-center gap-1.5">
@@ -2124,7 +2144,7 @@
                 el.innerHTML = `
                   <div class="flex items-center justify-between border-b border-zinc-700/70 pb-2.5">
                     <div class="flex items-center gap-2 flex-wrap">
-                      <span class="text-xs text-blue-400 font-mono font-semibold">${d.album}</span>
+                      <span class="text-xs text-blue-400 font-mono font-semibold">${escapeHtml(d.album)}</span>
                       ${locBadge}
                     </div>
                     <div class="flex items-center gap-1.5">
@@ -2177,11 +2197,15 @@
       const textarea = document.getElementById(`caption-edit-${id}`);
       if (!textarea) return;
       const text = textarea.value;
-      await fetch('/api/media/caption', {
+      const res = await fetch('/api/media/caption', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, caption: text })
       });
+      if (!res.ok) {
+        alert('Failed to save caption.');
+        return;
+      }
       if (activeLightboxInstance && activeLightboxInstance.currSlide && activeLightboxInstance.currSlide.data) {
         activeLightboxInstance.currSlide.data.caption = text;
       }
@@ -3140,7 +3164,7 @@
             syncMsg.textContent = `⚠️ ${errText}`;
           }
           if (errBox) {
-            errBox.innerHTML = `<div class="font-bold">⚠️ Error reloading media index:</div><div>${errText}</div>`;
+            errBox.innerHTML = `<div class="font-bold">⚠️ Error reloading media index:</div><div>${escapeHtml(errText)}</div>`;
             errBox.classList.remove('hidden');
           }
           return;
@@ -3154,7 +3178,7 @@
           }
           if (errBox) {
             errBox.innerHTML = `<div class="font-bold text-amber-300">⚠️ Folder Sync Warnings / Errors (${errs.length}):</div>` +
-              errs.map(e => `<div class="pl-2">• ${e}</div>`).join('');
+              errs.map(e => `<div class="pl-2">• ${escapeHtml(e)}</div>`).join('');
             errBox.classList.remove('hidden');
             const reloadSec = document.getElementById('settings-sec-reload');
             if (reloadSec) reloadSec.classList.remove('hidden');
@@ -3170,7 +3194,7 @@
           syncMsg.textContent = `⚠️ Error reloading index: ${detail}`;
         }
         if (errBox) {
-          errBox.innerHTML = `<div class="font-bold">⚠️ Error reloading media index:</div><div>${detail}</div>`;
+          errBox.innerHTML = `<div class="font-bold">⚠️ Error reloading media index:</div><div>${escapeHtml(detail)}</div>`;
           errBox.classList.remove('hidden');
         }
       }
@@ -3205,7 +3229,6 @@
 
         if (stData.authenticated && viewParam !== 'login') {
           document.getElementById('login-modal').classList.add('hidden');
-          sessionStorage.setItem('auth', 'true');
           if (stData.username) sessionStorage.setItem('username', stData.username);
           await loadAlbums();
           if (viewParam === 'grid' || viewParam === 'date') {
@@ -3219,7 +3242,7 @@
             switchView('globe');
           }
           await applyFiltersAndPaging(0);
-          if (viewParam === 'lightbox') {
+          if (viewParam === 'lightbox' && mediaItems.length > 0) {
             openPhotoViewer(0);
             setTimeout(() => {
               const p = document.querySelector('.custom-pswp-caption');
